@@ -183,7 +183,7 @@ object BCaller {
 
       val normalReferenceDepth = normalPileup.referenceDepth
       val normalVariantDepth = normalPileup.depth - normalReferenceDepth
-      val normalBeta = new BetaDistribution(normalVariantDepth, normalReferenceDepth)
+      val normalBeta = new BetaDistribution(1 + normalVariantDepth, 1 + normalReferenceDepth)
       val lowerBound = normalBeta.inverseCumulativeProbability(1 - interval)
       val upperBound = normalBeta.inverseCumulativeProbability(interval)
 
