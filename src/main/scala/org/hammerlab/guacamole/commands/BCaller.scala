@@ -173,12 +173,12 @@ object BCaller {
         minEdgeDistance = 0
       )
 
-      // For now, we skip loci that have no reads mapped. We may instead want to emit NoCall in this case.
-      //      if (filteredTumorPileup.elements.isEmpty
-      //        || filteredNormalPileup.elements.isEmpty
-      //        || filteredTumorPileup.depth > maxReadDepth // skip abnormally deep pileups
-      //        || filteredNormalPileup.depth > maxReadDepth
-      if (tumorPileup.referenceDepth == tumorPileup.depth) // skip computation if no alternate reads
+      //For now, we skip loci that have no reads mapped. We may instead want to emit NoCall in this case.
+            if (filteredTumorPileup.elements.isEmpty
+              || filteredNormalPileup.elements.isEmpty
+              || filteredTumorPileup.depth > maxReadDepth // skip abnormally deep pileups
+              || filteredNormalPileup.depth > maxReadDepth
+              || tumorPileup.referenceDepth == tumorPileup.depth) // skip computation if no alternate reads
         return Seq.empty
 
       val normalReferenceDepth = normalPileup.referenceDepth
