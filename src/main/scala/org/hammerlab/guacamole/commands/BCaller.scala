@@ -187,7 +187,7 @@ object BCaller {
       val lowerBound = normalBeta.inverseCumulativeProbability(1 - interval)
       val upperBound = normalBeta.inverseCumulativeProbability(interval)
 
-      val tumorVAF = (tumorPileup.depth - tumorPileup.referenceDepth).toFloat / tumorPileup.referenceDepth
+      val tumorVAF = (tumorPileup.depth - tumorPileup.referenceDepth).toFloat / tumorPileup.depth
 
       val (mostLikelyTumorGenotype, mostLikelyTumorGenotypeLikelihood) =
         Likelihood.likelihoodsOfAllPossibleGenotypesFromPileup(
