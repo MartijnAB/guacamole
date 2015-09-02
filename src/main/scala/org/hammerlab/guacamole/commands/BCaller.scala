@@ -211,7 +211,7 @@ object BCaller {
       lazy val normalVariantsTotalLikelihood = normalVariantGenotypes.map(_._2).sum
       lazy val somaticOdds = mostLikelyTumorGenotypeLikelihood / normalVariantsTotalLikelihood
 
-      if (tumorVAF > lowerBound && tumorVAF < upperBound) {
+      if (tumorVAF > upperBound) {
         for {
           // NOTE(ryan): currently only look at the first non-ref allele in the most likely tumor genotype.
           // removeCorrelatedGenotypes depends on there only being one variant per locus.
