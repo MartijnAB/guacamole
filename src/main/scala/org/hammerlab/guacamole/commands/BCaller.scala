@@ -184,10 +184,18 @@ object BCaller {
       val normalReferenceDepth = normalPileup.referenceDepth
       val normalVariantDepth = normalPileup.depth - normalReferenceDepth
       val normalBeta = new BetaDistribution(1 + normalVariantDepth, 1 + normalReferenceDepth)
-      val lowerBound = normalBeta.inverseCumulativeProbability(1 - interval)
-      val upperBound = normalBeta.inverseCumulativeProbability(interval)
+      val normalUpperBound = normalBeta.inverseCumulativeProbability(interval)
 
-      val tumorVAF = (tumorPileup.depth - tumorPileup.referenceDepth).toFloat / tumorPileup.depth
+
+      val tumorReferenceDepth = tumorPileup.referenceDepth
+      val tumorVariantDepth = tumorPileup.depth - tumorReferenceDepth
+      val tumorBeta = new BetaDistribution(1 + tumorVariantDepth, 1 + tumorReferenceDepth)
+      val tumorLowerBound = tumorBeta.inverseCumulativeProbability(1 - interval)
+
+      val tumorVAF = tumorVariantDepth.toFloat / tumorPileup.depth
+      val normalVAF = normalVariantDepth.toFloat / normalPileup.depth
+
+
 
       val (mostLikelyTumorGenotype, mostLikelyTumorGenotypeLikelihood) =
         Likelihood.likelihoodsOfAllPossibleGenotypesFromPileup(
@@ -211,7 +219,7 @@ object BCaller {
       lazy val normalVariantsTotalLikelihood = normalVariantGenotypes.map(_._2).sum
       lazy val somaticOdds = mostLikelyTumorGenotypeLikelihood / normalVariantsTotalLikelihood
 
-      if (tumorVAF > upperBound) {
+      if (tumorVAF > normalUpperBound && normalVAF < tumorLowerBound) {
         for {
           // NOTE(ryan): currently only look at the first non-ref allele in the most likely tumor genotype.
           // removeCorrelatedGenotypes depends on there only being one variant per locus.
