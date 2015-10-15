@@ -33,6 +33,7 @@ import org.apache.hadoop.fs.{ Path, FileSystem }
 import org.apache.http.client.utils.URLEncodedUtils
 import org.apache.spark.SparkContext
 import org.apache.spark.rdd.RDD
+import org.bdgenomics.adam.util.PhredUtils
 import org.hammerlab.guacamole.Common.Arguments.NoSequenceDictionary
 import org.hammerlab.guacamole.likelihood.Likelihood
 import org.hammerlab.guacamole.pileup._
@@ -156,8 +157,6 @@ object SomaticJoint {
     val subclone = Value("subclone")
   }
 
-  case class Locus(contig: String, start: Int, length: Int) {}
-
   case class Phasing(
                       relationship: PhaseRelationship.Value,
                       locus1: Locus,
@@ -166,15 +165,15 @@ object SomaticJoint {
                       allele2: String,
                       supportingReads: Int) {}
 
-  trait SmallVariant {
-    val locus: Locus
-    val ref: String
-    val alt: String
-  }
 
-  case class GermlineSmallVariant(locus: Locus, ref: String, alt: String) extends SmallVariant {}
+  case class GermlineSmallVariant(
+                                   contig: String,
+                                   position: Long,
+                                   ref: String,
+                                   alts: Seq[String],
+                                   likelihoods: Map[Seq[String], Double]) {}
 
-  case class SomaticSmallVariant(kind: VariantKind.Value, locus: Locus, ref: String, germline: Seq[String], alt: String) {}
+  //case class SomaticSmallVariant(kind: VariantKind.Value, locus: Locus, ref: String, germline: Seq[String], alt: String) {}
 
 
   object Caller extends SparkCommand[Arguments] {
@@ -207,7 +206,6 @@ object SomaticJoint {
       // TODO: we currently are re-shuffling on every pileupFlatMap call.
 
       // Call germline small variants.
-
       val germlineCalls = DistributedUtil.pileupFlatMapMultipleRDDs(
         groupedInputs.normalDNA.map(readSets(_).mappedReads),
         lociPartitions,
@@ -215,39 +213,68 @@ object SomaticJoint {
         pileups => findGermlineVariants(
           groupedInputs.normalDNA.map(inputs(_)),
           groupedInputs.relative(groupedInputs.normalDNA),
-          pileups))
+          pileups)).collect
+
+      Common.progress("Called %,d germline variants.".format(germlineCalls.length))
+      germlineCalls.foreach(println(_))
     }
   }
   def combinedPileup(pileups: Seq[Pileup]) = {
     val elements = pileups.flatMap(_.elements)
     Pileup(pileups(0).referenceName, pileups(0).locus, pileups(0).referenceBase, elements)
   }
+  def logLikelihoodPileup(elements: Iterable[PileupElement], mixture: Map[String, Double]): Double = {
+    def logLikelihoodPileupElement(element: PileupElement): Double = {
+      val mixtureFrequency = mixture.get(Bases.basesToString(element.sequencedBases)).getOrElse(0.0)
+      val probabilityCorrect = PhredUtils.phredToSuccessProbability(element.qualityScore) * element.read.alignmentLikelihood
+      math.log10(mixtureFrequency * probabilityCorrect + (1-mixtureFrequency) * probabilityCorrect / 3.0 )
+    }
+    elements.map(logLikelihoodPileupElement _).sum
+  }
+
   def findGermlineVariants(inputs: Seq[Input],
                            groupedInputs: GroupedInputs,
-                           pileups: Seq[Pileup] ): Iterator[variants.Genotype] = {
+                           pileups: Seq[Pileup],
+                          mutationPrior: Double = 0.001): Iterator[GermlineSmallVariant] = {
 
-    val pileup = combinedPileup(groupedInputs.normalDNA.map(pileups(_)))
+    val elements = groupedInputs.normalDNA.flatMap(pileups(_).elements)
 
-    val alleles = (Bases.pileup.referenceBase )
-      distinctAlleles.filter(allele => allele.altBases.forall((Bases.isStandardBase _)))
-    val allelesWithRef = if (alleles.contains(Allele()))
-    val genotypes = for {
-      i <- 0 until alleles.size
-      j <- i until alleles.size
-    } yield Genotype(alleles(i), alleles(j))
-    val likelihoods = likelihoodsOfGenotypes(pileup.elements, genotypes, probabilityCorrect, prior, logSpace, normalize)
-    genotypes.zip(likelihoods)
+    // We evaluate these models: (1) hom ref (2) het (3) hom alt (4) compound alt.
+    // TODO: integrate strand bias into this likelihood.
+    val ref = Bases.baseToString(pileups(0).referenceBase)
+    val alleleReadCounts = elements.groupBy(element => Bases.basesToString(element.sequencedBases)).mapValues(_.size)
+    val nonRefAlleles = alleleReadCounts.filterKeys(_ != ref).toSeq.sortBy(_._2).map(_._1)
+    if (nonRefAlleles.isEmpty) {
+      return Iterator.empty
+    }
 
+    val topAlt = nonRefAlleles(0)
+    val secondAlt = if (nonRefAlleles.size > 1) nonRefAlleles(1) else "N"
 
+    val logMutationPrior = math.log10(mutationPrior)
+    val logNotMutationPrior = math.log10(1 - mutationPrior)
 
-    val genotypeLikelihoods = Likelihood.likelihoodsOfAllPossibleGenotypesFromPileup(
-      combinedNormalPileup,
-      probabilityCorrect = Likelihood.probabilityCorrectIncludingAlignment,
-      logSpace = false,
-      normalize = false)
+    // The following are not true posterior probabilities, but are proportional to posteriors.
+    // Map from alleles to log probs.
+    val logUnnormalizedPosteriors = Map(
+      // Homozygous reference
+      Seq(ref, ref) -> (logLikelihoodPileup(elements, Map(ref -> 1.0)) + logNotMutationPrior),
 
-    val (genotype, probability) = genotypeLikelihoods.maxBy(_._2)
-    if (genotype.hasVariantAllele) Iterator(genotype) else Iterator.empty
+      // Het
+      Seq(topAlt) -> (logLikelihoodPileup(elements, Map(ref -> 0.5, topAlt -> 0.5)) + logMutationPrior),
+
+      // Homozygous alt
+      Seq(topAlt, topAlt) -> (logLikelihoodPileup(elements, Map(topAlt -> 1.0)) + logMutationPrior * 1.5),
+
+      // Compound alt
+      Seq(topAlt, secondAlt) ->
+        (logLikelihoodPileup(elements, Map(topAlt -> 0.5, secondAlt -> 0.5)) + logMutationPrior * 2)
+    )
+    val alts = logUnnormalizedPosteriors.toSeq.maxBy(_._2)._1
+    if (alts == Seq(ref, ref))
+      Iterator.empty  // no variants
+    else
+      Iterator(GermlineSmallVariant(pileups(0).referenceName, pileups(0).locus, ref, alts, logUnnormalizedPosteriors))
   }
 }
 
