@@ -20,14 +20,15 @@ package org.hammerlab.guacamole.commands
 
 import java.io.InputStreamReader
 import java.text.{ DecimalFormatSymbols, DecimalFormat }
+import java.util
 import java.util.Locale
 import javax.script._
 
 import com.google.common.io.CharStreams
 import htsjdk.samtools.util.Locus
-import htsjdk.variant.variantcontext.{Allele, VariantContextBuilder, VariantContext}
+import htsjdk.variant.variantcontext.{GenotypeBuilder, Allele, VariantContextBuilder, VariantContext}
 import htsjdk.variant.variantcontext.writer.VariantContextWriterBuilder
-import htsjdk.variant.vcf.{VCFHeader, VCFCodec}
+import htsjdk.variant.vcf._
 import org.apache.commons.io.IOUtils
 import org.apache.commons.lang.StringEscapeUtils
 import org.apache.hadoop.conf.Configuration
@@ -49,7 +50,7 @@ import scala.collection.JavaConversions
 import scala.collection.mutable.ArrayBuffer
 
 object SomaticJoint {
-  protected class Arguments extends DistributedUtil.Arguments with NoSequenceDictionary {
+  class Arguments extends DistributedUtil.Arguments with NoSequenceDictionary {
 
     @Argument(required = true, multiValued = true,
       usage = "FILE1 FILE2 FILE3")
@@ -221,30 +222,50 @@ object SomaticJoint {
 
       Common.progress("Called %,d germline variants.".format(germlineCalls.length))
 
+      val sampleName = readSets(0).reads.take(1)(0).sampleName
+
       if (args.outSmallGermlineVariants.nonEmpty) {
         Common.progress("Writing germline variants.")
         val codec = new VCFCodec()
         val writer = new VariantContextWriterBuilder()
           .setOutputFile(args.outSmallGermlineVariants)
           .setReferenceDictionary(readSets(0).sequenceDictionary.get.toSAMSequenceDictionary)
-          .build()
-        val header = new VCFHeader()
+          .build
+        val headerLines = new util.HashSet[VCFHeaderLine]()
+        headerLines.add(new VCFHeaderLine("GT", "Genotype"))
+        // headerLines.add(new VCFHeaderLine("FORMAT", "Format"))
+        // headerLines.add(
+        //   new VCFFormatHeaderLine("FT", VCFHeaderLineCount.UNBOUNDED, VCFHeaderLineType.String, "Genotype filters."))
+        headerLines.add(
+          new VCFFormatHeaderLine("GT", 1, VCFHeaderLineType.String, "Genotype."))
+
+        // headerLines.add(new VCFInfoHeaderLine())
+        val header = new VCFHeader(headerLines, JavaConversions.seqAsJavaList(Seq(sampleName)))
+        header.setSequenceDictionary(readSets(0).sequenceDictionary.get.toSAMSequenceDictionary)
+        header.setWriteCommandLine(true)
+        header.setWriteEngineHeaders(true)
         writer.writeHeader(header)
+
         germlineCalls.foreach(call => {
           assert(call.alts.nonEmpty)
           val altAlleles = call.alts.distinct.map(Allele.create(_, false))
           val alleles = if (altAlleles.length == 1) altAlleles ++ Seq(Allele.create(call.ref, true)) else altAlleles
+          val allelesIncludingRef = altAlleles ++ Seq(Allele.create(call.ref, true))
+          val genotype = new GenotypeBuilder(sampleName)
+            .alleles(JavaConversions.seqAsJavaList(alleles))
+            .make
           val context = new VariantContextBuilder()
             .chr(call.contig)
             .start(call.position)
             .stop(call.position + math.max(call.ref.length - 1, 0))
-            .alleles(JavaConversions.asJavaCollection(alleles))
+            .genotypes(genotype)
+            .alleles(JavaConversions.seqAsJavaList(allelesIncludingRef))
             .make
           writer.add(context)
         })
         writer.close()
       }
-      Common.progress("Wrote: %s".format(args.outSmallGermlineVariants))
+      Common.progress("Wrote %,d calls to %s".format(germlineCalls.length, args.outSmallGermlineVariants))
     }
   }
 
