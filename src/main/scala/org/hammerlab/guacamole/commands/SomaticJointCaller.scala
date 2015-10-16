@@ -25,7 +25,9 @@ import javax.script._
 
 import com.google.common.io.CharStreams
 import htsjdk.samtools.util.Locus
+import htsjdk.variant.variantcontext.{Allele, VariantContextBuilder, VariantContext}
 import htsjdk.variant.variantcontext.writer.VariantContextWriterBuilder
+import htsjdk.variant.vcf.{VCFHeader, VCFCodec}
 import org.apache.commons.io.IOUtils
 import org.apache.commons.lang.StringEscapeUtils
 import org.apache.hadoop.conf.Configuration
@@ -52,6 +54,9 @@ object SomaticJoint {
     @Argument(required = true, multiValued = true,
       usage = "FILE1 FILE2 FILE3")
     var inputs: Array[String] = Array.empty
+
+    @Args4jOption(name = "--out-small-germline-variants", usage = "Output path. Default: stdout")
+    var outSmallGermlineVariants: String = ""
 
     @Args4jOption(name = "--out-small-somatic-variants", usage = "Output path. Default: stdout")
     var outSmallSomaticVariants: String = ""
@@ -204,7 +209,6 @@ object SomaticJoint {
       val groupedInputs = GroupedInputs(inputs)
 
       // TODO: we currently are re-shuffling on every pileupFlatMap call.
-
       // Call germline small variants.
       val germlineCalls = DistributedUtil.pileupFlatMapMultipleRDDs(
         groupedInputs.normalDNA.map(readSets(_).mappedReads),
@@ -216,9 +220,34 @@ object SomaticJoint {
           pileups)).collect
 
       Common.progress("Called %,d germline variants.".format(germlineCalls.length))
-      germlineCalls.foreach(println(_))
+
+      if (args.outSmallGermlineVariants.nonEmpty) {
+        Common.progress("Writing germline variants.")
+        val codec = new VCFCodec()
+        val writer = new VariantContextWriterBuilder()
+          .setOutputFile(args.outSmallGermlineVariants)
+          .setReferenceDictionary(readSets(0).sequenceDictionary.get.toSAMSequenceDictionary)
+          .build()
+        val header = new VCFHeader()
+        writer.writeHeader(header)
+        germlineCalls.foreach(call => {
+          assert(call.alts.nonEmpty)
+          val altAlleles = call.alts.distinct.map(Allele.create(_, false))
+          val alleles = if (altAlleles.length == 1) altAlleles ++ Seq(Allele.create(call.ref, true)) else altAlleles
+          val context = new VariantContextBuilder()
+            .chr(call.contig)
+            .start(call.position)
+            .stop(call.position + math.max(call.ref.length - 1, 0))
+            .alleles(JavaConversions.asJavaCollection(alleles))
+            .make
+          writer.add(context)
+        })
+        writer.close()
+      }
+      Common.progress("Wrote: %s".format(args.outSmallGermlineVariants))
     }
   }
+
   def combinedPileup(pileups: Seq[Pileup]) = {
     val elements = pileups.flatMap(_.elements)
     Pileup(pileups(0).referenceName, pileups(0).locus, pileups(0).referenceBase, elements)
@@ -253,6 +282,11 @@ object SomaticJoint {
 
     val logMutationPrior = math.log10(mutationPrior)
     val logNotMutationPrior = math.log10(1 - mutationPrior)
+
+    // TODO: get rid of this, and handle indels.
+    if (topAlt.length != 1 || secondAlt.length != 1) {
+      return Iterator.empty
+    }
 
     // The following are not true posterior probabilities, but are proportional to posteriors.
     // Map from alleles to log probs.
