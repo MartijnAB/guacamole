@@ -248,18 +248,23 @@ object SomaticJoint {
 
         germlineCalls.foreach(call => {
           assert(call.alts.nonEmpty)
-          val altAlleles = call.alts.distinct.map(Allele.create(_, false))
-          val alleles = if (altAlleles.length == 1) altAlleles ++ Seq(Allele.create(call.ref, true)) else altAlleles
-          val allelesIncludingRef = altAlleles ++ Seq(Allele.create(call.ref, true))
+
+          val genotypeAlleles = if (call.alts.length == 1) {
+            Seq(Allele.create(call.ref, true)) ++ call.alts.map(Allele.create(_, false))
+          } else {
+            call.alts.map(Allele.create(_, false))
+          }
+          val allAlleles = Seq(Allele.create(call.ref, true)) ++ call.alts.distinct.map(Allele.create(_, false))
+
           val genotype = new GenotypeBuilder(sampleName)
-            .alleles(JavaConversions.seqAsJavaList(alleles))
+            .alleles(JavaConversions.seqAsJavaList(genotypeAlleles))
             .make
           val context = new VariantContextBuilder()
             .chr(call.contig)
-            .start(call.position)
-            .stop(call.position + math.max(call.ref.length - 1, 0))
+            .start(call.position + 1)  // one based based inclusive
+            .stop(call.position + 1 + math.max(call.ref.length - 1, 0))
             .genotypes(genotype)
-            .alleles(JavaConversions.seqAsJavaList(allelesIncludingRef))
+            .alleles(JavaConversions.seqAsJavaList(allAlleles))
             .make
           writer.add(context)
         })
@@ -285,7 +290,9 @@ object SomaticJoint {
   def findGermlineVariants(inputs: Seq[Input],
                            groupedInputs: GroupedInputs,
                            pileups: Seq[Pileup],
-                          mutationPrior: Double = 0.001): Iterator[GermlineSmallVariant] = {
+                          negativeLog10HeterozygousPrior: Double = 3,
+                          negativeLog10HomozygousAlternatePrior: Double = 4,
+                          negativeLog10CompoundAlternatePrior: Double = 8): Iterator[GermlineSmallVariant] = {
 
     val elements = groupedInputs.normalDNA.flatMap(pileups(_).elements)
 
@@ -301,8 +308,8 @@ object SomaticJoint {
     val topAlt = nonRefAlleles(0)
     val secondAlt = if (nonRefAlleles.size > 1) nonRefAlleles(1) else "N"
 
-    val logMutationPrior = math.log10(mutationPrior)
-    val logNotMutationPrior = math.log10(1 - mutationPrior)
+    //val logMutationPrior = math.log10(mutationPrior)
+    //val logNotMutationPrior = Seq(log10NotHeterozygousPrior, log10 math.log10(1 - mutationPrior)
 
     // TODO: get rid of this, and handle indels.
     if (topAlt.length != 1 || secondAlt.length != 1) {
@@ -313,17 +320,17 @@ object SomaticJoint {
     // Map from alleles to log probs.
     val logUnnormalizedPosteriors = Map(
       // Homozygous reference
-      Seq(ref, ref) -> (logLikelihoodPileup(elements, Map(ref -> 1.0)) + logNotMutationPrior),
+      Seq(ref, ref) -> (logLikelihoodPileup(elements, Map(ref -> 1.0))),
 
       // Het
-      Seq(topAlt) -> (logLikelihoodPileup(elements, Map(ref -> 0.5, topAlt -> 0.5)) + logMutationPrior),
+      Seq(topAlt) -> (logLikelihoodPileup(elements, Map(ref -> 0.5, topAlt -> 0.5)) - negativeLog10HeterozygousPrior),
 
       // Homozygous alt
-      Seq(topAlt, topAlt) -> (logLikelihoodPileup(elements, Map(topAlt -> 1.0)) + logMutationPrior * 1.5),
+      Seq(topAlt, topAlt) -> (logLikelihoodPileup(elements, Map(topAlt -> 1.0)) - negativeLog10HomozygousAlternatePrior),
 
       // Compound alt
       Seq(topAlt, secondAlt) ->
-        (logLikelihoodPileup(elements, Map(topAlt -> 0.5, secondAlt -> 0.5)) + logMutationPrior * 2)
+        (logLikelihoodPileup(elements, Map(topAlt -> 0.5, secondAlt -> 0.5)) - negativeLog10CompoundAlternatePrior)
     )
     val alts = logUnnormalizedPosteriors.toSeq.maxBy(_._2)._1
     if (alts == Seq(ref, ref))
