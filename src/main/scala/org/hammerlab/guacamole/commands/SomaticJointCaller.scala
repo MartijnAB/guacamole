@@ -171,15 +171,165 @@ object SomaticJoint {
                       allele2: String,
                       supportingReads: Int) {}
 
+  def logLikelihoodPileup(elements: Iterable[PileupElement], mixture: Map[String, Double]): Double = {
+    def logLikelihoodPileupElement(element: PileupElement): Double = {
+      val mixtureFrequency = mixture.get(Bases.basesToString(element.sequencedBases)).getOrElse(0.0)
+      val probabilityCorrect =
+        PhredUtils.phredToSuccessProbability(element.qualityScore) * element.read.alignmentLikelihood
+      math.log10(mixtureFrequency * probabilityCorrect + (1-mixtureFrequency) * probabilityCorrect / 3.0 )
+    }
+    elements.map(logLikelihoodPileupElement _).sum
+  }
 
-  case class GermlineSmallVariant(
-                                   contig: String,
-                                   position: Long,
-                                   ref: String,
-                                   alts: Seq[String],
-                                   likelihoods: Map[Seq[String], Double]) {}
 
-  //case class SomaticSmallVariant(kind: VariantKind.Value, locus: Locus, ref: String, germline: Seq[String], alt: String) {}
+  class GermlineSmallVariantCall(normalDNAPileups: Seq[Pileup],
+                                 negativeLog10HeterozygousPrior: Double = 2,
+                                 negativeLog10HomozygousAlternatePrior: Double = 4,
+                                 negativeLog10CompoundAlternatePrior: Double = 8) {
+
+    // Essential information.
+    var sampleName = ""
+    var contig = ""
+    var position = -1L
+    var ref = ""
+    var topAlt = ""
+    var secondAlt = ""
+    var genotype = ("", "")
+
+    // Additional diagnostic info.
+    var allelicDepths = Map[String, Int]()
+    var depth = -1
+    var logUnnormalizedPosteriors = Map[(String, String), Double]()
+
+    def call(pileups: Seq[Pileup]): Boolean = {
+      sampleName = pileups(0).sampleName
+      contig = pileups(0).referenceName
+      position = pileups(0).locus
+      ref = Bases.baseToString(pileups(0).referenceBase)
+
+      val elements = normalDNAPileups.flatMap(_.elements)
+      depth = elements.length
+
+      // We evaluate these models: (1) hom ref (2) het (3) hom alt (4) compound alt.
+      // TODO: integrate strand bias into this likelihood.
+      allelicDepths = elements.groupBy(element => Bases.basesToString(element.sequencedBases)).mapValues(_.size)
+      val nonRefAlleles = allelicDepths.filterKeys(_ != ref).toSeq.sortBy(_._2 * -1).map(_._1)
+      if (nonRefAlleles.isEmpty) {
+        return false
+      }
+
+      topAlt = nonRefAlleles(0)
+      secondAlt = if (nonRefAlleles.size > 1) nonRefAlleles(1) else "N"
+
+      //val logMutationPrior = math.log10(mutationPrior)
+      //val logNotMutationPrior = Seq(log10NotHeterozygousPrior, log10 math.log10(1 - mutationPrior)
+
+      // TODO: get rid of this, and handle indels.
+      if (topAlt.length != 1 || secondAlt.length != 1) {
+        return false
+      }
+
+      // The following are not true posterior probabilities, but are proportional to posteriors.
+      // Map from alleles to log probs.
+      logUnnormalizedPosteriors = Map(
+        // Homozygous reference
+        (ref, ref) -> (logLikelihoodPileup(elements, Map(ref -> 1.0))),
+
+        // Het
+        (ref, topAlt) -> (logLikelihoodPileup(elements, Map(ref -> 0.5, topAlt -> 0.5)) - negativeLog10HeterozygousPrior),
+
+        // Homozygous alt
+        (topAlt, topAlt) -> (logLikelihoodPileup(elements, Map(topAlt -> 1.0)) - negativeLog10HomozygousAlternatePrior),
+
+        // Compound alt
+        (topAlt, secondAlt) ->
+          (logLikelihoodPileup(elements, Map(topAlt -> 0.5, secondAlt -> 0.5)) - negativeLog10CompoundAlternatePrior)
+      )
+      genotype = logUnnormalizedPosteriors.toSeq.maxBy(_._2)._1
+      genotype != (ref, ref)
+    }
+
+    def toHtsjdVariantContext(): VariantContext = {
+      assume(genotype != (ref, ref))
+
+      def makeHtsjdkAllele(allele: String): Allele = Allele.create(allele, allele == ref)
+
+      val alleles = Seq(ref, genotype._1, genotype._2).distinct
+
+      // If there is a true second alt with evidence, the PL field will have 4 values (hom ref, het, hom alt, compound
+      // alt), otherwise just 3. The 4-allele version seems to be different than what e.g. the GATK does, but is
+      // more useful.
+      val possibleGenotypes = Seq((ref, ref), (ref, topAlt), (topAlt, topAlt)) ++
+        (if (secondAlt != "N") Seq((topAlt, secondAlt)) else Seq.empty)
+
+      new VariantContextBuilder()
+        .chr(contig)
+        .start(position + 1)  // one based based inclusive
+        .stop(position + 1 + math.max(ref.length - 1, 0))
+        .genotypes(
+          new GenotypeBuilder(sampleName)
+            .alleles(JavaConversions.seqAsJavaList(Seq(genotype._1, genotype._2).map(makeHtsjdkAllele _)))
+            .AD(alleles.map(allelicDepths.getOrElse(_, 0)).toArray)
+            .PL(GermlineSmallVariantCall.unnormalizedLogProbsToNormalizedPhred(
+              possibleGenotypes.map(
+                value => logUnnormalizedPosteriors.getOrElse(value, Double.NegativeInfinity))).toArray)
+            .DP(depth)
+            .make)
+        .alleles(JavaConversions.seqAsJavaList(alleles.map(makeHtsjdkAllele _)))
+        .make
+    }
+  }
+
+  object GermlineSmallVariantCall {
+    def unnormalizedLogProbsToNormalizedPhred(log10Probabilities: Seq[Double], log10Precision: Double = -16): Seq[Double] = {
+      // See: http://stats.stackexchange.com/questions/66616/converting-normalizing-very-small-likelihood-values-to-probability
+      // val threshold = log10Precision - math.log10(log10Probabilities.length.toDouble)
+      val max = log10Probabilities.max
+      val rescaled = log10Probabilities.map(_ - max)
+      val exponentials = rescaled.map(math.pow(10, _))
+      val sum = exponentials.sum
+      exponentials.map(value => math.log10(1 - (value / sum)) * -10.0)
+    }
+
+    def writeVcf(path: String, sampleName: String, readSets: Seq[ReadSet], calls: Iterable[GermlineSmallVariantCall]) = {
+      val writer = new VariantContextWriterBuilder()
+        .setOutputFile(path)
+        .setReferenceDictionary(readSets(0).sequenceDictionary.get.toSAMSequenceDictionary)
+        .build
+      val headerLines = new util.HashSet[VCFHeaderLine]()
+      headerLines.add(new VCFHeaderLine("GT", "Genotype"))
+      headerLines.add(new VCFFormatHeaderLine("GT", 1, VCFHeaderLineType.String, "Genotype"))
+
+      headerLines.add(new VCFFormatHeaderLine(
+        "AD",
+        VCFHeaderLineCount.R,
+        VCFHeaderLineType.Integer,
+        "Allelic depths for the ref and alt alleles"))
+
+      headerLines.add(new VCFFormatHeaderLine(
+        "PL",
+        VCFHeaderLineCount.G,
+        VCFHeaderLineType.Integer,
+        "Phred scaled genotype likelihoods"))
+
+      headerLines.add(new VCFFormatHeaderLine(
+        "DP",
+        1,
+        VCFHeaderLineType.Integer,
+        "Total depth"))
+
+      val header = new VCFHeader(headerLines, JavaConversions.seqAsJavaList(Seq(sampleName)))
+      header.setSequenceDictionary(readSets(0).sequenceDictionary.get.toSAMSequenceDictionary)
+      header.setWriteCommandLine(true)
+      header.setWriteEngineHeaders(true)
+      writer.writeHeader(header)
+
+      calls.foreach(call => {
+        writer.add(call.toHtsjdVariantContext)
+      })
+      writer.close()
+    }
+  }
 
 
   object Caller extends SparkCommand[Arguments] {
@@ -215,60 +365,17 @@ object SomaticJoint {
         groupedInputs.normalDNA.map(readSets(_).mappedReads),
         lociPartitions,
         true,  // skip empty
-        pileups => findGermlineVariants(
-          groupedInputs.normalDNA.map(inputs(_)),
-          groupedInputs.relative(groupedInputs.normalDNA),
-          pileups)).collect
+        pileups => {
+          val maybeCall = new GermlineSmallVariantCall(groupedInputs.normalDNA.map(pileups(_)))
+          if (maybeCall.call(pileups)) Iterator(maybeCall) else Iterator.empty
+        }).collect
 
       Common.progress("Called %,d germline variants.".format(germlineCalls.length))
 
-      val sampleName = readSets(0).reads.take(1)(0).sampleName
-
       if (args.outSmallGermlineVariants.nonEmpty) {
         Common.progress("Writing germline variants.")
-        val codec = new VCFCodec()
-        val writer = new VariantContextWriterBuilder()
-          .setOutputFile(args.outSmallGermlineVariants)
-          .setReferenceDictionary(readSets(0).sequenceDictionary.get.toSAMSequenceDictionary)
-          .build
-        val headerLines = new util.HashSet[VCFHeaderLine]()
-        headerLines.add(new VCFHeaderLine("GT", "Genotype"))
-        // headerLines.add(new VCFHeaderLine("FORMAT", "Format"))
-        // headerLines.add(
-        //   new VCFFormatHeaderLine("FT", VCFHeaderLineCount.UNBOUNDED, VCFHeaderLineType.String, "Genotype filters."))
-        headerLines.add(
-          new VCFFormatHeaderLine("GT", 1, VCFHeaderLineType.String, "Genotype."))
-
-        // headerLines.add(new VCFInfoHeaderLine())
-        val header = new VCFHeader(headerLines, JavaConversions.seqAsJavaList(Seq(sampleName)))
-        header.setSequenceDictionary(readSets(0).sequenceDictionary.get.toSAMSequenceDictionary)
-        header.setWriteCommandLine(true)
-        header.setWriteEngineHeaders(true)
-        writer.writeHeader(header)
-
-        germlineCalls.foreach(call => {
-          assert(call.alts.nonEmpty)
-
-          val genotypeAlleles = if (call.alts.length == 1) {
-            Seq(Allele.create(call.ref, true)) ++ call.alts.map(Allele.create(_, false))
-          } else {
-            call.alts.map(Allele.create(_, false))
-          }
-          val allAlleles = Seq(Allele.create(call.ref, true)) ++ call.alts.distinct.map(Allele.create(_, false))
-
-          val genotype = new GenotypeBuilder(sampleName)
-            .alleles(JavaConversions.seqAsJavaList(genotypeAlleles))
-            .make
-          val context = new VariantContextBuilder()
-            .chr(call.contig)
-            .start(call.position + 1)  // one based based inclusive
-            .stop(call.position + 1 + math.max(call.ref.length - 1, 0))
-            .genotypes(genotype)
-            .alleles(JavaConversions.seqAsJavaList(allAlleles))
-            .make
-          writer.add(context)
-        })
-        writer.close()
+        val sampleName = readSets(0).reads.take(1)(0).sampleName
+        GermlineSmallVariantCall.writeVcf(args.outSmallGermlineVariants, sampleName, readSets, germlineCalls)
       }
       Common.progress("Wrote %,d calls to %s".format(germlineCalls.length, args.outSmallGermlineVariants))
     }
@@ -278,65 +385,4 @@ object SomaticJoint {
     val elements = pileups.flatMap(_.elements)
     Pileup(pileups(0).referenceName, pileups(0).locus, pileups(0).referenceBase, elements)
   }
-  def logLikelihoodPileup(elements: Iterable[PileupElement], mixture: Map[String, Double]): Double = {
-    def logLikelihoodPileupElement(element: PileupElement): Double = {
-      val mixtureFrequency = mixture.get(Bases.basesToString(element.sequencedBases)).getOrElse(0.0)
-      val probabilityCorrect = PhredUtils.phredToSuccessProbability(element.qualityScore) * element.read.alignmentLikelihood
-      math.log10(mixtureFrequency * probabilityCorrect + (1-mixtureFrequency) * probabilityCorrect / 3.0 )
-    }
-    elements.map(logLikelihoodPileupElement _).sum
-  }
-
-  def findGermlineVariants(inputs: Seq[Input],
-                           groupedInputs: GroupedInputs,
-                           pileups: Seq[Pileup],
-                          negativeLog10HeterozygousPrior: Double = 3,
-                          negativeLog10HomozygousAlternatePrior: Double = 4,
-                          negativeLog10CompoundAlternatePrior: Double = 8): Iterator[GermlineSmallVariant] = {
-
-    val elements = groupedInputs.normalDNA.flatMap(pileups(_).elements)
-
-    // We evaluate these models: (1) hom ref (2) het (3) hom alt (4) compound alt.
-    // TODO: integrate strand bias into this likelihood.
-    val ref = Bases.baseToString(pileups(0).referenceBase)
-    val alleleReadCounts = elements.groupBy(element => Bases.basesToString(element.sequencedBases)).mapValues(_.size)
-    val nonRefAlleles = alleleReadCounts.filterKeys(_ != ref).toSeq.sortBy(_._2).map(_._1)
-    if (nonRefAlleles.isEmpty) {
-      return Iterator.empty
-    }
-
-    val topAlt = nonRefAlleles(0)
-    val secondAlt = if (nonRefAlleles.size > 1) nonRefAlleles(1) else "N"
-
-    //val logMutationPrior = math.log10(mutationPrior)
-    //val logNotMutationPrior = Seq(log10NotHeterozygousPrior, log10 math.log10(1 - mutationPrior)
-
-    // TODO: get rid of this, and handle indels.
-    if (topAlt.length != 1 || secondAlt.length != 1) {
-      return Iterator.empty
-    }
-
-    // The following are not true posterior probabilities, but are proportional to posteriors.
-    // Map from alleles to log probs.
-    val logUnnormalizedPosteriors = Map(
-      // Homozygous reference
-      Seq(ref, ref) -> (logLikelihoodPileup(elements, Map(ref -> 1.0))),
-
-      // Het
-      Seq(topAlt) -> (logLikelihoodPileup(elements, Map(ref -> 0.5, topAlt -> 0.5)) - negativeLog10HeterozygousPrior),
-
-      // Homozygous alt
-      Seq(topAlt, topAlt) -> (logLikelihoodPileup(elements, Map(topAlt -> 1.0)) - negativeLog10HomozygousAlternatePrior),
-
-      // Compound alt
-      Seq(topAlt, secondAlt) ->
-        (logLikelihoodPileup(elements, Map(topAlt -> 0.5, secondAlt -> 0.5)) - negativeLog10CompoundAlternatePrior)
-    )
-    val alts = logUnnormalizedPosteriors.toSeq.maxBy(_._2)._1
-    if (alts == Seq(ref, ref))
-      Iterator.empty  // no variants
-    else
-      Iterator(GermlineSmallVariant(pileups(0).referenceName, pileups(0).locus, ref, alts, logUnnormalizedPosteriors))
-  }
 }
-
