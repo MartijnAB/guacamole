@@ -18,10 +18,9 @@
 
 package org.hammerlab.guacamole
 
-import java.io.{ InputStreamReader, OutputStream }
-import java.util
-import java.util.Calendar
+import java.io.{ File, InputStreamReader, OutputStream }
 
+import htsjdk.variant.vcf.VCFFileReader
 import org.apache.avro.generic.GenericDatumWriter
 import org.apache.avro.io.EncoderFactory
 import org.apache.commons.io.IOUtils
@@ -220,7 +219,7 @@ object Common extends Logging {
    *
    * @param args parsed arguments
    */
-  def loci(args: Arguments.Loci): LociSet.Builder = {
+  def lociFromArguments(args: Arguments.Loci): LociSet.Builder = {
     if (args.loci.nonEmpty && args.lociFromFile.nonEmpty) {
       throw new IllegalArgumentException("Specify at most one of the 'loci' and 'loci-from-file' arguments")
     }
@@ -236,6 +235,42 @@ object Common extends Logging {
       "all"
     }
     LociSet.parse(lociToParse)
+
+  }
+
+  def lociFromFile(filePath: String, readSet: ReadSet): LociSet = {
+    if (filePath.endsWith(".vcf")) {
+      val builder = LociSet.newBuilder
+      val reader = new VCFFileReader(new File(filePath), false)
+      val iterator = reader.iterator
+      while (iterator.hasNext) {
+        val value = iterator.next()
+        builder.put(value.getContig, value.getStart - 1, Some(value.getEnd.toLong))
+      }
+      builder.result
+    } else if (filePath.endsWith(".loci")) {
+      val filesystem = FileSystem.get(new Configuration())
+      val path = new Path(filePath)
+      LociSet.parse(
+        IOUtils.toString(new InputStreamReader(filesystem.open(path)))).result(readSet.contigLengths)
+    } else {
+      throw new IllegalArgumentException(
+        "Couldn't guess format for file: %s. Files should end in '.loci' or '.vcf'.".format(filePath))
+    }
+  }
+
+  def loci(loci: String, lociFromFilePath: String, readSet: ReadSet): LociSet = {
+    if (loci.nonEmpty && lociFromFilePath.nonEmpty) {
+      throw new IllegalArgumentException("Specify at most one of the 'loci' and 'loci-from-file' arguments")
+    }
+    if (loci.nonEmpty) {
+      LociSet.parse(loci).result(Some(readSet.contigLengths))
+    } else if (lociFromFilePath.nonEmpty) {
+      lociFromFile(lociFromFilePath, readSet)
+    } else {
+      // Default is "all"
+      LociSet.parse("all").result(Some(readSet.contigLengths))
+    }
   }
 
   /**
@@ -310,8 +345,8 @@ object Common extends Logging {
    * @param envVariables The variables found on the commandline
    * @return array of (key, value) pairs parsed from the command line.
    */
-  def parseEnvVariables(envVariables: util.ArrayList[String]): Array[(String, String)] = {
-    envVariables.foldLeft(Array[(String, String)]()) {
+  def parseEnvVariables(envVariables: Seq[String]): Seq[(String, String)] = {
+    envVariables.foldLeft(Seq[(String, String)]()) {
       (a, kv) =>
         val kvSplit = kv.split("=")
         if (kvSplit.size != 2) {
@@ -371,7 +406,7 @@ object Common extends Logging {
   def progress(message: String): Unit = {
     val current = System.currentTimeMillis
     val time = if (lastProgressTime == 0)
-      Calendar.getInstance.getTime.toString
+      java.util.Calendar.getInstance.getTime.toString
     else
       "%.2f sec. later".format((current - lastProgressTime) / 1000.0)
     println("--> [%15s]: %s".format(time, message))

@@ -57,7 +57,7 @@ object GermlineThreshold {
 
     override def run(args: Arguments, sc: SparkContext): Unit = {
       Common.validateArguments(args)
-      val loci = Common.loci(args)
+      val loci = Common.lociFromArguments(args)
       val readSet = Common.loadReadsFromArguments(
         args, sc, Read.InputFilters(
           overlapsLoci = Some(loci), nonDuplicate = true, hasMdTag = true))

@@ -24,7 +24,7 @@ import htsjdk.variant.variantcontext.VariantContext
 import htsjdk.variant.vcf.VCFFileReader
 import org.hammerlab.guacamole.commands.SomaticJoint.Arguments
 import org.hammerlab.guacamole.util.{ TestUtil, GuacFunSuite }
-import org.hammerlab.guacamole.{LociMap, Bases}
+import org.hammerlab.guacamole.{ LociMap, Bases }
 import org.hammerlab.guacamole.filters.SomaticGenotypeFilter
 import org.hammerlab.guacamole.pileup.Pileup
 import org.hammerlab.guacamole.reads.MappedRead
@@ -34,7 +34,7 @@ import org.scalatest.prop.TableDrivenPropertyChecks
 import scala.collection.JavaConversions
 import scala.collection.mutable.ArrayBuffer
 
-class SomaticJointCallerSuite extends GuacFunSuite with Matchers with TableDrivenPropertyChecks {
+class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
 
   def loadPileup(filename: String, referenceName: String, locus: Long = 0): Pileup = {
     val records = TestUtil.loadReads(sc, filename).mappedReads
@@ -64,7 +64,6 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers with TableDrive
     }
     results
   }
-
 
   case class VCFComparison(gold: Seq[VariantContext], experimental: Seq[VariantContext]) {
 
@@ -106,17 +105,17 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers with TableDrive
         "specificity (partial): %1.2f%%".format((exactMatch.size + partialMatch.size) * 100.0 / experimental.size)
       ).mkString("\n")
     }
-    
+
   }
   object VCFComparison {
     private def accumulate(
-                    records: Seq[VariantContext],
-                    map: LociMap[VariantContext],
-                    exactMatch: ArrayBuffer[(VariantContext, VariantContext)],
-                    partialMatch: ArrayBuffer[(VariantContext, VariantContext)],
-                    unique: ArrayBuffer[VariantContext]): Unit = {
+      records: Seq[VariantContext],
+      map: LociMap[VariantContext],
+      exactMatch: ArrayBuffer[(VariantContext, VariantContext)],
+      partialMatch: ArrayBuffer[(VariantContext, VariantContext)],
+      unique: ArrayBuffer[VariantContext]): Unit = {
       records.foreach(record1 => {
-        map.onContig(record1.getChr).get(record1.getStart) match {
+        map.onContig(record1.getContig).get(record1.getStart) match {
           case Some(record2) => {
             if (variantToString(record1) == variantToString(record2)) {
               exactMatch += ((record1, record2))
@@ -133,41 +132,55 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers with TableDrive
       val builder = LociMap.newBuilder[VariantContext]()
       records.foreach(record => {
         // Switch from zero based inclusive to interbase coordinates.
-        builder.put(record.getChr, record.getStart, record.getEnd + 1, record)
+        builder.put(record.getContig, record.getStart, record.getEnd + 1, record)
       })
       builder.result
     }
   }
 
-  def variantToString(variant: VariantContext): String = {
+  def variantToString(variant: VariantContext, verbose: Boolean = false): String = {
     val genotype = variant.getGenotype(0)
 
-    "%s:%d-%d %s > %s %s".format(
-      variant.getChr,
-      variant.getStart,
-      variant.getEnd,
-      variant.getReference,
-      JavaConversions.collectionAsScalaIterable(variant.getAlternateAlleles).map(_.toString).mkString(","),
-      genotype.getType.toString)
+    if (verbose) {
+      variant.toString
+    } else {
+      "%s:%d-%d %s > %s %s".format(
+        variant.getContig,
+        variant.getStart,
+        variant.getEnd,
+        variant.getReference,
+        JavaConversions.collectionAsScalaIterable(variant.getAlternateAlleles).map(_.toString).mkString(","),
+        genotype.getType.toString)
+    }
   }
 
   def printSamplePairs(pairs: Seq[(VariantContext, VariantContext)], num: Int = 20): Unit = {
     val sample = pairs.take(num)
     println("Showing %,d / %,d.".format(sample.size, pairs.size))
-    sample.zipWithIndex.foreach({case (pair, num) => {
-      println("(%4d) %20s vs %20s".format(num + 1, variantToString(pair._1), variantToString(pair._2)))
-    }})
-  }
-
-  /*
-  def printSample(items: Seq[VariantContext], num: Int = 20): Unit = {
-    val sample = pairs.take(num)
-    println("Showing %,d / %,d.".format(sample))
-    sample.foreach(pair => {
-      println("%20s vs %20s".format(variantToString(pair._1), variantToString(pair._2)))
+    sample.zipWithIndex.foreach({
+      case (pair, num) => {
+        println("(%4d) %20s vs %20s \tDETAILS: %20s vs %20s".format(
+          num + 1,
+          variantToString(pair._1, false),
+          variantToString(pair._2, false),
+          variantToString(pair._1, true),
+          variantToString(pair._2, true)))
+      }
     })
   }
-  */
+
+  def printSample(items: Seq[VariantContext], num: Int = 20): Unit = {
+    val sample = items.take(num)
+    println("Showing %,d / %,d.".format(sample.size, items.size))
+    sample.zipWithIndex.foreach({
+      case (item, num) => {
+        println("(%4d) %20s \tDETAILS: %29s".format(
+          num + 1,
+          variantToString(item, false),
+          variantToString(item, true)))
+      }
+    })
+  }
 
   sparkTest("germline calling on subset of illumina platinum NA12878") {
     val resultFile = tempFile(".vcf")
@@ -176,7 +189,8 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers with TableDrive
     val args = new SomaticJoint.Arguments()
     args.outSmallGermlineVariants = resultFile
     args.inputs = Seq(na12878_subset_bam).toArray
-    args.loci = "chr1:0-5000000"
+    args.loci = "chr1:0-6700000"
+    args.forceCallLociFromFile = na12878_gold_calls_vcf
     SomaticJoint.Caller.run(args, sc)
 
     val readerGold = new VCFFileReader(new File(na12878_gold_calls_vcf), false)
@@ -184,7 +198,7 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers with TableDrive
     val reader = new VCFFileReader(new File(resultFile), false)
     val recordsGuacamole = vcfRecords(reader)
     println("Guacamole calls: %,d. Gold calls: %,d.".format(recordsGuacamole.length, recordsGold.length))
-    
+
     val comparison = VCFComparison(recordsGold, recordsGuacamole)
     println(comparison.summary)
 
@@ -196,9 +210,15 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers with TableDrive
     printSamplePairs(comparison.partialMatch)
     println()
 
+    println("MISSED CALLS")
+    printSample(comparison.uniqueToGold)
+    println()
+
+    println("BAD CALLS")
+    printSample(comparison.uniqueToExperimental)
+    println()
 
     println(comparison.summary)
-
 
   }
 }
