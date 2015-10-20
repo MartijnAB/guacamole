@@ -18,32 +18,19 @@
 
 package org.hammerlab.guacamole.commands
 
-import java.io.InputStreamReader
-import java.text.{ DecimalFormatSymbols, DecimalFormat }
 import java.util
-import java.util.Locale
-import javax.script._
 
-import com.google.common.io.CharStreams
 import htsjdk.samtools.util.Locus
 import htsjdk.variant.variantcontext.{GenotypeBuilder, Allele, VariantContextBuilder, VariantContext}
 import htsjdk.variant.variantcontext.writer.VariantContextWriterBuilder
 import htsjdk.variant.vcf._
-import org.apache.commons.io.IOUtils
-import org.apache.commons.lang.StringEscapeUtils
-import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{ Path, FileSystem }
 import org.apache.http.client.utils.URLEncodedUtils
 import org.apache.spark.SparkContext
-import org.apache.spark.rdd.RDD
 import org.bdgenomics.adam.util.PhredUtils
 import org.hammerlab.guacamole.Common.Arguments.NoSequenceDictionary
-import org.hammerlab.guacamole.likelihood.Likelihood
 import org.hammerlab.guacamole.pileup._
 import org.hammerlab.guacamole.reads._
 import org.hammerlab.guacamole._
-import org.hammerlab.guacamole.variants.{Genotype, AlleleEvidence, CalledAllele}
-import org.kohsuke.args4j.spi.StringArrayOptionHandler
 import org.kohsuke.args4j.{ Option => Args4jOption, Argument }
 
 import scala.collection.JavaConversions
@@ -56,10 +43,19 @@ object SomaticJoint {
       usage = "FILE1 FILE2 FILE3")
     var inputs: Array[String] = Array.empty
 
-    @Args4jOption(name = "--out-small-germline-variants", usage = "Output path. Default: stdout")
+    @Args4jOption(name = "--force-call-loci-from-file", usage = "Always call the given sites")
+    var forceCallLociFromFile: String = ""
+
+    @Args4jOption(name = "--force-call-loci", usage = "Always call the given sites")
+    var forceCallLoci: String = ""
+
+    @Args4jOption(name = "--normal-sample-name", usage = "Sample name to use for VCF output of germline calls")
+    var normalSampleName: String = "NORMAL"
+
+    @Args4jOption(name = "--out-small-germline-variants", usage = "Output path. Default: no output")
     var outSmallGermlineVariants: String = ""
 
-    @Args4jOption(name = "--out-small-somatic-variants", usage = "Output path. Default: stdout")
+    @Args4jOption(name = "--out-small-somatic-variants", usage = "Output path. Default: no outupt")
     var outSmallSomaticVariants: String = ""
 
     @Args4jOption(name = "-q", usage = "Quiet: less stdout")
@@ -182,43 +178,37 @@ object SomaticJoint {
   }
 
 
-  class GermlineSmallVariantCall(normalDNAPileups: Seq[Pileup],
-                                 negativeLog10HeterozygousPrior: Double = 2,
+  class GermlineSmallVariantCall(negativeLog10HeterozygousPrior: Double = 2,
                                  negativeLog10HomozygousAlternatePrior: Double = 4,
                                  negativeLog10CompoundAlternatePrior: Double = 8) {
 
     // Essential information.
-    var sampleName = ""
     var contig = ""
     var position = -1L
     var ref = ""
     var topAlt = ""
     var secondAlt = ""
-    var genotype = ("", "")
+    var genotype = ("N", "N")
 
     // Additional diagnostic info.
     var allelicDepths = Map[String, Int]()
     var depth = -1
     var logUnnormalizedPosteriors = Map[(String, String), Double]()
 
-    def call(pileups: Seq[Pileup]): Boolean = {
-      sampleName = pileups(0).sampleName
-      contig = pileups(0).referenceName
-      position = pileups(0).locus
-      ref = Bases.baseToString(pileups(0).referenceBase)
-
+    def call(normalDNAPileups: Seq[Pileup]): Boolean = {
       val elements = normalDNAPileups.flatMap(_.elements)
       depth = elements.length
+
+      contig = normalDNAPileups(0).referenceName
+      position = normalDNAPileups(0).locus
+      ref = Bases.baseToString(normalDNAPileups(0).referenceBase)
 
       // We evaluate these models: (1) hom ref (2) het (3) hom alt (4) compound alt.
       // TODO: integrate strand bias into this likelihood.
       allelicDepths = elements.groupBy(element => Bases.basesToString(element.sequencedBases)).mapValues(_.size)
       val nonRefAlleles = allelicDepths.filterKeys(_ != ref).toSeq.sortBy(_._2 * -1).map(_._1)
-      if (nonRefAlleles.isEmpty) {
-        return false
-      }
 
-      topAlt = nonRefAlleles(0)
+      topAlt = nonRefAlleles.headOption.getOrElse("N")
       secondAlt = if (nonRefAlleles.size > 1) nonRefAlleles(1) else "N"
 
       //val logMutationPrior = math.log10(mutationPrior)
@@ -249,9 +239,7 @@ object SomaticJoint {
       genotype != (ref, ref)
     }
 
-    def toHtsjdVariantContext(): VariantContext = {
-      assume(genotype != (ref, ref))
-
+    def toHtsjdVariantContext(sampleName: String): VariantContext = {
       def makeHtsjdkAllele(allele: String): Allele = Allele.create(allele, allele == ref)
 
       val alleles = Seq(ref, genotype._1, genotype._2).distinct
@@ -274,6 +262,8 @@ object SomaticJoint {
               possibleGenotypes.map(
                 value => logUnnormalizedPosteriors.getOrElse(value, Double.NegativeInfinity))).toArray)
             .DP(depth)
+            .attribute("RL", logUnnormalizedPosteriors.map(
+              pair => "%s/%s=%1.2f".format(pair._1._1, pair._1._2, pair._2)).mkString(" "))
             .make)
         .alleles(JavaConversions.seqAsJavaList(alleles.map(makeHtsjdkAllele _)))
         .make
@@ -297,35 +287,25 @@ object SomaticJoint {
         .setReferenceDictionary(readSets(0).sequenceDictionary.get.toSAMSequenceDictionary)
         .build
       val headerLines = new util.HashSet[VCFHeaderLine]()
-      headerLines.add(new VCFHeaderLine("GT", "Genotype"))
       headerLines.add(new VCFFormatHeaderLine("GT", 1, VCFHeaderLineType.String, "Genotype"))
-
-      headerLines.add(new VCFFormatHeaderLine(
-        "AD",
-        VCFHeaderLineCount.R,
-        VCFHeaderLineType.Integer,
+      headerLines.add(new VCFFormatHeaderLine("AD", VCFHeaderLineCount.R, VCFHeaderLineType.Integer,
         "Allelic depths for the ref and alt alleles"))
-
-      headerLines.add(new VCFFormatHeaderLine(
-        "PL",
-        VCFHeaderLineCount.G,
-        VCFHeaderLineType.Integer,
+      headerLines.add(new VCFFormatHeaderLine("PL", VCFHeaderLineCount.G, VCFHeaderLineType.Integer,
         "Phred scaled genotype likelihoods"))
+      headerLines.add(new VCFFormatHeaderLine("DP", 1, VCFHeaderLineType.Integer, "Total depth"))
 
-      headerLines.add(new VCFFormatHeaderLine(
-        "DP",
-        1,
-        VCFHeaderLineType.Integer,
-        "Total depth"))
+      // nonstandard
+      headerLines.add(new VCFFormatHeaderLine("RL", 1, VCFHeaderLineType.String, "Unnormalized log10 genotype posteriors"))
 
       val header = new VCFHeader(headerLines, JavaConversions.seqAsJavaList(Seq(sampleName)))
       header.setSequenceDictionary(readSets(0).sequenceDictionary.get.toSAMSequenceDictionary)
       header.setWriteCommandLine(true)
       header.setWriteEngineHeaders(true)
+      header.addMetaDataLine(new VCFHeaderLine("Caller", "Guacamole"))
       writer.writeHeader(header)
 
       calls.foreach(call => {
-        writer.add(call.toHtsjdVariantContext)
+        writer.add(call.toHtsjdVariantContext(sampleName))
       })
       writer.close()
     }
@@ -354,9 +334,24 @@ object SomaticJoint {
         "Samples have different sequence dictionaries: %s."
           .format(readSets.map(_.sequenceDictionary.toString).mkString("\n")))
 
-      val loci = Common.loci(args, readSets(0))
-      val lociPartitions = DistributedUtil.partitionLociAccordingToArgs(args, loci, readSets.map(_.mappedReads): _*)
+      val loci = Common.lociFromArguments(args, readSets(0))
+      val forceCallLoci = if (args.forceCallLoci.nonEmpty || args.forceCallLociFromFile.nonEmpty) {
+        Common.loci(args.forceCallLoci, args.forceCallLociFromFile, readSets(0))
+      } else {
+        LociSet.empty
+      }
 
+      if (forceCallLoci.nonEmpty) {
+        Common.progress("Force calling %,d loci across %,d contig(s): %s".format(
+          forceCallLoci.count,
+          forceCallLoci.contigs.length,
+          forceCallLoci.truncatedString()))
+      }
+
+      readSets(0).source
+
+      val broadcastForceCallLoci = sc.broadcast(forceCallLoci)
+      val lociPartitions = DistributedUtil.partitionLociAccordingToArgs(args, loci, readSets.map(_.mappedReads): _*)
       val groupedInputs = GroupedInputs(inputs)
 
       // TODO: we currently are re-shuffling on every pileupFlatMap call.
@@ -364,18 +359,22 @@ object SomaticJoint {
       val germlineCalls = DistributedUtil.pileupFlatMapMultipleRDDs(
         groupedInputs.normalDNA.map(readSets(_).mappedReads),
         lociPartitions,
-        true,  // skip empty
+        false,  // skip empty
         pileups => {
-          val maybeCall = new GermlineSmallVariantCall(groupedInputs.normalDNA.map(pileups(_)))
-          if (maybeCall.call(pileups)) Iterator(maybeCall) else Iterator.empty
+          val maybeCall = new GermlineSmallVariantCall()
+          val called = maybeCall.call(groupedInputs.normalDNA.map(pileups(_)))
+          if (called || broadcastForceCallLoci.value.onContig(pileups(0).referenceName).contains(pileups(0).locus)) {
+            Iterator(maybeCall)
+          } else {
+            Iterator.empty
+          }
         }).collect
 
       Common.progress("Called %,d germline variants.".format(germlineCalls.length))
 
       if (args.outSmallGermlineVariants.nonEmpty) {
         Common.progress("Writing germline variants.")
-        val sampleName = readSets(0).reads.take(1)(0).sampleName
-        GermlineSmallVariantCall.writeVcf(args.outSmallGermlineVariants, sampleName, readSets, germlineCalls)
+        GermlineSmallVariantCall.writeVcf(args.outSmallGermlineVariants, args.normalSampleName, readSets, germlineCalls)
       }
       Common.progress("Wrote %,d calls to %s".format(germlineCalls.length, args.outSmallGermlineVariants))
     }

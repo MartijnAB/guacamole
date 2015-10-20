@@ -115,12 +115,12 @@ class LociSetSuite extends GuacFunSuite with Matchers {
     // Test -loci argument
     val args1 = new TestArgs()
     args1.loci = "20:100-200"
-    Common.loci(args1, emptyReadSet) should equal(LociSet.parse("20:100-200"))
+    Common.lociFromArguments(args1, emptyReadSet) should equal(LociSet.parse("20:100-200"))
 
     // Test -loci-from-file argument. The test file gives a loci set equal to 20:100-200.
     val args2 = new TestArgs()
     args2.lociFromFile = TestUtil.testDataPath("loci.txt")
-    Common.loci(args2, emptyReadSet) should equal(LociSet.parse("20:100-200"))
+    Common.lociFromArguments(args2, emptyReadSet) should equal(LociSet.parse("20:100-200"))
   }
 
   sparkTest("serialization: make an RDD[LociSet]") {

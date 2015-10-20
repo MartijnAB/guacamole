@@ -18,10 +18,12 @@
 
 package org.hammerlab.guacamole
 
-import java.io.{ InputStreamReader, OutputStream }
+import java.io.{File, InputStreamReader, OutputStream}
 import java.util
 import java.util.Calendar
 
+import htsjdk.variant.variantcontext.VariantContext
+import htsjdk.variant.vcf.VCFFileReader
 import org.apache.avro.generic.GenericDatumWriter
 import org.apache.avro.io.EncoderFactory
 import org.apache.commons.io.IOUtils
@@ -39,6 +41,8 @@ import org.codehaus.jackson.JsonFactory
 import org.hammerlab.guacamole.reference.ReferenceGenome
 import org.kohsuke.args4j.{ Option => Args4jOption }
 
+import scala.collection.mutable.ArrayBuffer
+
 /**
  * Basic functions that most commands need, and specifications of command-line arguments that they use.
  *
@@ -54,7 +58,7 @@ object Common extends Logging {
     /** Argument for accepting a set of loci. */
     trait Loci extends Base {
       @Args4jOption(name = "--loci", usage = "Loci at which to call variants. Either 'all' or contig:start-end,contig:start-end,...",
-        forbids = Array("-loci-from-file"))
+        forbids = Array("--loci-from-file"))
       var loci: String = ""
 
       @Args4jOption(name = "--loci-from-file", usage = "Path to file giving loci at which to call variants.",
@@ -178,34 +182,55 @@ object Common extends Logging {
   }
 
   /**
-   * If the user specifies a -loci argument, parse it out and return the LociSet. Otherwise, construct a LociSet that
+   * If the user specifies a --loci argument, parse it out and return the LociSet. Otherwise, construct a LociSet that
    * includes all the loci in the contigs.
    *
    * @param args parsed arguments
    * @param readSet readSet from which to use to get contigs and lengths.
    */
-  def loci(args: Arguments.Loci, readSet: ReadSet): LociSet = {
-    if (args.loci.nonEmpty && args.lociFromFile.nonEmpty) {
-      throw new IllegalArgumentException("Specify at most one of the 'loci' and 'loci-from-file' arguments")
-    }
-    val lociToParse = if (args.loci.nonEmpty) {
-      args.loci
-    } else if (args.lociFromFile.nonEmpty) {
-      // Load loci from file.
-      val filesystem = FileSystem.get(new Configuration())
-      val path = new Path(args.lociFromFile)
-      IOUtils.toString(new InputStreamReader(filesystem.open(path)))
-    } else {
-      // Default is "all"
-      "all"
-    }
-
-    val result = LociSet.parse(lociToParse, Some(readSet.contigLengths))
+  def lociFromArguments(args: Arguments.Loci, readSet: ReadSet): LociSet = {
+    val result = loci(args.loci, args.lociFromFile, readSet)
     progress("Including %,d loci across %,d contig(s): %s".format(
       result.count,
       result.contigs.length,
       result.truncatedString()))
     result
+  }
+
+  def lociFromFile(filePath: String, readSet: ReadSet): LociSet = {
+    if (filePath.endsWith(".vcf")) {
+      val builder = LociSet.newBuilder
+      val reader = new VCFFileReader(new File(filePath), false)
+      val iterator = reader.iterator
+      while (iterator.hasNext) {
+        val value = iterator.next()
+        builder.put(value.getChr, value.getStart - 1, value.getEnd)
+      }
+      builder.result
+    } else if (filePath.endsWith(".loci")) {
+      val filesystem = FileSystem.get(new Configuration())
+      val path = new Path(filePath)
+      LociSet.parse(
+        IOUtils.toString(new InputStreamReader(filesystem.open(path))),
+        Some(readSet.contigLengths))
+    } else {
+      throw new IllegalArgumentException(
+        "Couldn't guess format for file: %s. Files should end in '.loci' or '.vcf'.".format(filePath))
+    }
+  }
+
+  def loci(loci: String, lociFromFilePath: String, readSet: ReadSet): LociSet = {
+    if (loci.nonEmpty && lociFromFilePath.nonEmpty) {
+      throw new IllegalArgumentException("Specify at most one of the 'loci' and 'loci-from-file' arguments")
+    }
+    if (loci.nonEmpty) {
+      LociSet.parse(loci, Some(readSet.contigLengths))
+    } else if (lociFromFilePath.nonEmpty) {
+      lociFromFile(lociFromFilePath, readSet)
+    } else {
+      // Default is "all"
+      LociSet.parse("all", Some(readSet.contigLengths))
+    }
   }
 
   /**

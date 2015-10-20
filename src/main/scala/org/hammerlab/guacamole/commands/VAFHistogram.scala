@@ -108,7 +108,7 @@ object VAFHistogram {
           )
       )
 
-      val loci = Common.loci(args, readSets(0))
+      val loci = Common.lociFromArguments(args, readSets(0))
       val lociPartitions = DistributedUtil.partitionLociAccordingToArgs(
         args,
         loci,
