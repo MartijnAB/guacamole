@@ -21,7 +21,7 @@ package org.hammerlab.guacamole.commands
 import java.util
 
 import htsjdk.samtools.util.Locus
-import htsjdk.variant.variantcontext.{GenotypeBuilder, Allele, VariantContextBuilder, VariantContext}
+import htsjdk.variant.variantcontext.{ GenotypeBuilder, Allele, VariantContextBuilder, VariantContext }
 import htsjdk.variant.variantcontext.writer.VariantContextWriterBuilder
 import htsjdk.variant.vcf._
 import org.apache.http.client.utils.URLEncodedUtils
@@ -160,23 +160,33 @@ object SomaticJoint {
   }
 
   case class Phasing(
-                      relationship: PhaseRelationship.Value,
-                      locus1: Locus,
-                      locus2: Locus,
-                      allele1: String,
-                      allele2: String,
-                      supportingReads: Int) {}
+    relationship: PhaseRelationship.Value,
+    locus1: Locus,
+    locus2: Locus,
+    allele1: String,
+    allele2: String,
+    supportingReads: Int) {}
 
   def logLikelihoodPileup(elements: Iterable[PileupElement], mixture: Map[String, Double]): Double = {
+    if (elements.headOption.exists(_.locus == 126020)) {
+      println("hit")
+    }
+
     def logLikelihoodPileupElement(element: PileupElement): Double = {
       val mixtureFrequency = mixture.get(Bases.basesToString(element.sequencedBases)).getOrElse(0.0)
-      val probabilityCorrect =
-        PhredUtils.phredToSuccessProbability(element.qualityScore) * element.read.alignmentLikelihood
-      math.log10(mixtureFrequency * probabilityCorrect + (1-mixtureFrequency) * probabilityCorrect / 3.0 )
-    }
-    elements.map(logLikelihoodPileupElement _).sum
-  }
 
+      // Very low mapping or base qualities (e.g. the frequent case of mapping quality = 0) can cause probabilityCorrect
+      // to be low or even 0. We do not allow it to be < 0.5.
+      val probabilityCorrect =
+        math.max(PhredUtils.phredToSuccessProbability(element.qualityScore) * element.read.alignmentLikelihood, 0.5)
+
+      val loglikelihood = math.log10(
+        mixtureFrequency * probabilityCorrect + (1 - mixtureFrequency) * (1 - probabilityCorrect) / 3.0)
+      loglikelihood
+    }
+    val loglikelihoods = elements.map(logLikelihoodPileupElement _)
+    loglikelihoods.sum
+  }
 
   class GermlineSmallVariantCall(negativeLog10HeterozygousPrior: Double = 2,
                                  negativeLog10HomozygousAlternatePrior: Double = 4,
@@ -236,6 +246,9 @@ object SomaticJoint {
           (logLikelihoodPileup(elements, Map(topAlt -> 0.5, secondAlt -> 0.5)) - negativeLog10CompoundAlternatePrior)
       )
       genotype = logUnnormalizedPosteriors.toSeq.maxBy(_._2)._1
+      if (position == 126112) {
+        println("Hit")
+      }
       genotype != (ref, ref)
     }
 
@@ -252,7 +265,7 @@ object SomaticJoint {
 
       new VariantContextBuilder()
         .chr(contig)
-        .start(position + 1)  // one based based inclusive
+        .start(position + 1) // one based based inclusive
         .stop(position + 1 + math.max(ref.length - 1, 0))
         .genotypes(
           new GenotypeBuilder(sampleName)
@@ -311,7 +324,6 @@ object SomaticJoint {
     }
   }
 
-
   object Caller extends SparkCommand[Arguments] {
     override val name = "somatic-joint"
     override val description = "somatic caller for any number of samples from the same patient"
@@ -359,7 +371,7 @@ object SomaticJoint {
       val germlineCalls = DistributedUtil.pileupFlatMapMultipleRDDs(
         groupedInputs.normalDNA.map(readSets(_).mappedReads),
         lociPartitions,
-        false,  // skip empty
+        false, // skip empty
         pileups => {
           val maybeCall = new GermlineSmallVariantCall()
           val called = maybeCall.call(groupedInputs.normalDNA.map(pileups(_)))

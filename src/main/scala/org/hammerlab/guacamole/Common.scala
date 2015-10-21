@@ -18,7 +18,7 @@
 
 package org.hammerlab.guacamole
 
-import java.io.{File, InputStreamReader, OutputStream}
+import java.io.{ File, InputStreamReader, OutputStream }
 import java.util
 import java.util.Calendar
 
@@ -207,7 +207,7 @@ object Common extends Logging {
         builder.put(value.getChr, value.getStart - 1, value.getEnd)
       }
       builder.result
-    } else if (filePath.endsWith(".loci")) {
+    } else if (filePath.endsWith(".loci") || filePath.endsWith(".txt")) {
       val filesystem = FileSystem.get(new Configuration())
       val path = new Path(filePath)
       LociSet.parse(
@@ -215,7 +215,7 @@ object Common extends Logging {
         Some(readSet.contigLengths))
     } else {
       throw new IllegalArgumentException(
-        "Couldn't guess format for file: %s. Files should end in '.loci' or '.vcf'.".format(filePath))
+        "Couldn't guess format for file: %s. Expected file extensions: '.loci' or '.txt' for loci string format; '.vcf' for VCFs.".format(filePath))
     }
   }
 
