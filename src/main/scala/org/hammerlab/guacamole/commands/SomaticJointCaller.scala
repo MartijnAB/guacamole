@@ -168,13 +168,20 @@ object SomaticJoint {
     supportingReads: Int) {}
 
   def logLikelihoodPileup(elements: Iterable[PileupElement], mixture: Map[String, Double]): Double = {
+    if (elements.headOption.exists(_.locus == 126020)) {
+      println("hit")
+    }
+
     def logLikelihoodPileupElement(element: PileupElement): Double = {
       val mixtureFrequency = mixture.get(Bases.basesToString(element.sequencedBases)).getOrElse(0.0)
+
       val probabilityCorrect =
         PhredUtils.phredToSuccessProbability(element.qualityScore) * element.read.alignmentLikelihood
-      math.log10(mixtureFrequency * probabilityCorrect + (1 - mixtureFrequency) * probabilityCorrect / 3.0)
+      math.log10(
+        mixtureFrequency * probabilityCorrect + (1 - mixtureFrequency) * (1 - probabilityCorrect) / 3.0)
     }
-    elements.map(logLikelihoodPileupElement _).sum
+    val loglikelihoods = elements.map(logLikelihoodPileupElement _)
+    loglikelihoods.sum
   }
 
   class GermlineSmallVariantCall(negativeLog10HeterozygousPrior: Double = 2,
@@ -235,6 +242,9 @@ object SomaticJoint {
           (logLikelihoodPileup(elements, Map(topAlt -> 0.5, secondAlt -> 0.5)) - negativeLog10CompoundAlternatePrior)
       )
       genotype = logUnnormalizedPosteriors.toSeq.maxBy(_._2)._1
+      if (position == 126112) {
+        println("Hit")
+      }
       genotype != (ref, ref)
     }
 

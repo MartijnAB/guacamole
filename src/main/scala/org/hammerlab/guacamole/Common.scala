@@ -248,14 +248,14 @@ object Common extends Logging {
         builder.put(value.getContig, value.getStart - 1, Some(value.getEnd.toLong))
       }
       builder.result
-    } else if (filePath.endsWith(".loci")) {
+    } else if (filePath.endsWith(".loci") || filePath.endsWith(".txt")) {
       val filesystem = FileSystem.get(new Configuration())
       val path = new Path(filePath)
       LociSet.parse(
         IOUtils.toString(new InputStreamReader(filesystem.open(path)))).result(readSet.contigLengths)
     } else {
       throw new IllegalArgumentException(
-        "Couldn't guess format for file: %s. Files should end in '.loci' or '.vcf'.".format(filePath))
+        "Couldn't guess format for file: %s. Expected file extensions: '.loci' or '.txt' for loci string format; '.vcf' for VCFs.".format(filePath))
     }
   }
 

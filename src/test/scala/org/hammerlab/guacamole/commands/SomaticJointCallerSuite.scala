@@ -52,7 +52,7 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
   val na12878_subset_bam = TestUtil.testDataPath(
     "illumina-platinum-na12878-extract/NA12878.10k_variants.plus_chr1_3M-3.1M.bam")
 
-  val na12878_gold_calls_vcf = TestUtil.testDataPath(
+  val na12878_expected_calls_vcf = TestUtil.testDataPath(
     "illumina-platinum-na12878-extract/NA12878.subset.vcf")
 
   def vcfRecords(reader: VCFFileReader): Seq[VariantContext] = {
@@ -65,27 +65,30 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
     results
   }
 
-  case class VCFComparison(gold: Seq[VariantContext], experimental: Seq[VariantContext]) {
+  case class VCFComparison(expected: Seq[VariantContext], experimental: Seq[VariantContext]) {
 
-    val mapGold = VCFComparison.makeLociMap(gold)
+    val mapExpected = VCFComparison.makeLociMap(expected)
     val mapExperimental = VCFComparison.makeLociMap(experimental)
 
     val exactMatch = new ArrayBuffer[(VariantContext, VariantContext)]
     val partialMatch = new ArrayBuffer[(VariantContext, VariantContext)]
-    val uniqueToGold = new ArrayBuffer[VariantContext]
+    val uniqueToExpected = new ArrayBuffer[VariantContext]
     val uniqueToExperimental = new ArrayBuffer[VariantContext]
 
-    VCFComparison.accumulate(gold, mapExperimental, exactMatch, partialMatch, uniqueToGold)
+    VCFComparison.accumulate(expected, mapExperimental, exactMatch, partialMatch, uniqueToExpected)
 
     {
       // Accumulate result.{exact,partial}Match in throwaway arrays so we don't double count.
       val exactMatch2 = new ArrayBuffer[(VariantContext, VariantContext)]
       val partialMatch2 = new ArrayBuffer[(VariantContext, VariantContext)]
 
-      VCFComparison.accumulate(experimental, mapGold, exactMatch2, partialMatch2, uniqueToExperimental)
+      VCFComparison.accumulate(experimental, mapExpected, exactMatch2, partialMatch2, uniqueToExperimental)
       // assert(exactMatch2.size == exactMatch.size)
       // assert(partialMatch2.size == partialMatch.size)
     }
+
+    def sensitivity = exactMatch.size * 100.0 / expected.size
+    def specificity = exactMatch.size * 100.0 / experimental.size
 
     def summary(): String = {
       /*
@@ -97,12 +100,10 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
       Seq(
         "exact match: %,d".format(exactMatch.size),
         "partial match: %,d".format(partialMatch.size),
-        "unique to gold: %,d".format(uniqueToGold.size),
+        "unique to expected: %,d".format(uniqueToExpected.size),
         "unique to experimental: %,d".format(uniqueToExperimental.size),
-        "sensitivity (exact): %1.2f%%".format(exactMatch.size * 100.0 / gold.size),
-        "sensitivity (partial): %1.2f%%".format((exactMatch.size + partialMatch.size) * 100.0 / gold.size),
-        "specificity (exact): %1.2f%%".format(exactMatch.size * 100.0 / experimental.size),
-        "specificity (partial): %1.2f%%".format((exactMatch.size + partialMatch.size) * 100.0 / experimental.size)
+        "sensitivity: %1.2f%%".format(sensitivity),
+        "specificity: %1.2f%%".format(specificity)
       ).mkString("\n")
     }
 
@@ -186,39 +187,43 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
     val resultFile = tempFile(".vcf")
     println(resultFile)
 
-    val args = new SomaticJoint.Arguments()
-    args.outSmallGermlineVariants = resultFile
-    args.inputs = Seq(na12878_subset_bam).toArray
-    args.loci = "chr1:0-6700000"
-    args.forceCallLociFromFile = na12878_gold_calls_vcf
-    SomaticJoint.Caller.run(args, sc)
+    if (true) {
+      val args = new SomaticJoint.Arguments()
+      args.outSmallGermlineVariants = resultFile
+      args.inputs = Seq(na12878_subset_bam).toArray
+      args.loci = "chr1:0-6700000"
+      args.forceCallLociFromFile = na12878_expected_calls_vcf
+      SomaticJoint.Caller.run(args, sc)
+    }
 
-    val readerGold = new VCFFileReader(new File(na12878_gold_calls_vcf), false)
-    val recordsGold = vcfRecords(readerGold)
+    val readerExpected = new VCFFileReader(new File(na12878_expected_calls_vcf), false)
+    val recordsExpected = vcfRecords(readerExpected)
     val reader = new VCFFileReader(new File(resultFile), false)
     val recordsGuacamole = vcfRecords(reader)
-    println("Guacamole calls: %,d. Gold calls: %,d.".format(recordsGuacamole.length, recordsGold.length))
 
-    val comparison = VCFComparison(recordsGold, recordsGuacamole)
-    println(comparison.summary)
+    println("Guacamole calls: %,d. Gold calls: %,d.".format(recordsGuacamole.length, recordsExpected.length))
 
-    println("EXACT MATCHES")
-    printSamplePairs(comparison.exactMatch)
-    println()
+    val comparisonFull = VCFComparison(recordsExpected, recordsGuacamole)
+    val comparisonPlatinumOnly = VCFComparison(
+      recordsExpected.filter(_.getAttributeAsString("metal", "") == "platinum"),
+      recordsGuacamole)
 
-    println("PARTIAL MATCHES")
-    printSamplePairs(comparison.partialMatch)
-    println()
+    println("Sensitivity on platinum: %f".format(comparisonPlatinumOnly.sensitivity))
+    println("Specificity on full: %f".format(comparisonFull.specificity))
 
-    println("MISSED CALLS")
-    printSample(comparison.uniqueToGold)
+    println(comparisonFull.summary)
+
+    println("MISSED CALLS IN PLATINUM WITH DEPTH")
+    printSamplePairs(comparisonPlatinumOnly.partialMatch.filter(
+      pair => pair._2.getGenotype(0).isHomRef && pair._2.getGenotype(0).getDP > 5))
     println()
 
     println("BAD CALLS")
-    printSample(comparison.uniqueToExperimental)
+    printSamplePairs(comparisonFull.partialMatch.filter(
+      pair => !pair._2.getGenotype(0).isHomRef))
     println()
 
-    println(comparison.summary)
+    println(comparisonFull.summary)
 
   }
 }
