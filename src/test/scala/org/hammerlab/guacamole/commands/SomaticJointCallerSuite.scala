@@ -55,6 +55,8 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
   val na12878_expected_calls_vcf = TestUtil.testDataPath(
     "illumina-platinum-na12878-extract/NA12878.subset.vcf")
 
+  val chr1_prefix_fasta = TestUtil.testDataPath("illumina-platinum-na12878-extract/chr1.prefix.fa")
+
   def vcfRecords(reader: VCFFileReader): Seq[VariantContext] = {
     val results = new ArrayBuffer[VariantContext]
     val iterator = reader.iterator
@@ -193,6 +195,7 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
       args.inputs = Seq(na12878_subset_bam).toArray
       args.loci = "chr1:0-6700000"
       args.forceCallLociFromFile = na12878_expected_calls_vcf
+      args.referenceFastaPath = chr1_prefix_fasta
       SomaticJoint.Caller.run(args, sc)
     }
 

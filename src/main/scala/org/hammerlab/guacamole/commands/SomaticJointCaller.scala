@@ -31,6 +31,7 @@ import org.hammerlab.guacamole.Common.Arguments.NoSequenceDictionary
 import org.hammerlab.guacamole.pileup._
 import org.hammerlab.guacamole.reads._
 import org.hammerlab.guacamole._
+import org.hammerlab.guacamole.reference.ReferenceBroadcast
 import org.kohsuke.args4j.{ Option => Args4jOption, Argument }
 
 import scala.collection.JavaConversions
@@ -57,6 +58,9 @@ object SomaticJoint {
 
     @Args4jOption(name = "--out-small-somatic-variants", usage = "Output path. Default: no outupt")
     var outSmallSomaticVariants: String = ""
+
+    @Args4jOption(name = "--reference-fasta", required = false, usage = "Local path to a reference FASTA file")
+    var referenceFastaPath: String = null
 
     @Args4jOption(name = "-q", usage = "Quiet: less stdout")
     var quiet: Boolean = false
@@ -169,16 +173,19 @@ object SomaticJoint {
 
   def logLikelihoodPileup(elements: Iterable[PileupElement], mixture: Map[String, Double]): Double = {
     def logLikelihoodPileupElement(element: PileupElement): Double = {
-      val mixtureFrequency = mixture.get(Bases.basesToString(element.sequencedBases)).getOrElse(0.0)
+      if (element.read.alignmentQuality == 0) {
+        0.0
+      } else {
+        val mixtureFrequency = mixture.get(Bases.basesToString(element.sequencedBases)).getOrElse(0.0)
 
-      // Very low mapping or base qualities (e.g. the frequent case of mapping quality = 0) can cause probabilityCorrect
-      // to be low or even 0. We do not allow it to be < 0.5.
-      val probabilityCorrect =
-        math.max(PhredUtils.phredToSuccessProbability(element.qualityScore) * element.read.alignmentLikelihood, 0.5)
+        // Very low mapping or base qualities can cause probabilityCorrect low or even 0. We do not allow it to be < 0.5.
+        val probabilityCorrect =
+          math.max(PhredUtils.phredToSuccessProbability(element.qualityScore) * element.read.alignmentLikelihood, 0.5)
 
-      val loglikelihood = math.log10(
-        mixtureFrequency * probabilityCorrect + (1 - mixtureFrequency) * (1 - probabilityCorrect) / 3.0)
-      loglikelihood
+        val loglikelihood = math.log10(
+          mixtureFrequency * probabilityCorrect + (1 - mixtureFrequency) * (1 - probabilityCorrect) / 3.0)
+        loglikelihood
+      }
     }
     val loglikelihoods = elements.map(logLikelihoodPileupElement _)
     loglikelihoods.sum
@@ -207,11 +214,11 @@ object SomaticJoint {
 
       contig = normalDNAPileups(0).referenceName
       position = normalDNAPileups(0).locus
-      ref = Bases.baseToString(normalDNAPileups(0).referenceBase)
+      ref = Bases.baseToString(normalDNAPileups(0).referenceBase).toUpperCase
 
       // We evaluate these models: (1) hom ref (2) het (3) hom alt (4) compound alt.
       // TODO: integrate strand bias into this likelihood.
-      allelicDepths = elements.groupBy(element => Bases.basesToString(element.sequencedBases)).mapValues(_.size)
+      allelicDepths = elements.groupBy(element => Bases.basesToString(element.sequencedBases).toUpperCase).mapValues(_.size)
       val nonRefAlleles = allelicDepths.filterKeys(_ != ref).toSeq.sortBy(_._2 * -1).map(_._1)
 
       topAlt = nonRefAlleles.headOption.getOrElse("N")
@@ -242,7 +249,7 @@ object SomaticJoint {
           (logLikelihoodPileup(elements, Map(topAlt -> 0.5, secondAlt -> 0.5)) - negativeLog10CompoundAlternatePrior)
       )
       genotype = logUnnormalizedPosteriors.toSeq.maxBy(_._2)._1
-      genotype != (ref, ref)
+      genotype != (ref, ref) && topAlt != "N"
     }
 
     def toHtsjdVariantContext(sampleName: String): VariantContext = {
@@ -256,6 +263,12 @@ object SomaticJoint {
       val possibleGenotypes = Seq((ref, ref), (ref, topAlt), (topAlt, topAlt)) ++
         (if (secondAlt != "N") Seq((topAlt, secondAlt)) else Seq.empty)
 
+      val genotypeLikelihoods = GermlineSmallVariantCall.logPosteriorsToNormalizedPhred(
+        possibleGenotypes.map(
+          value => logUnnormalizedPosteriors.getOrElse(value, Double.NegativeInfinity))).map(_.toInt)
+
+      val genotypeQuality = genotypeLikelihoods.sorted.seq(1)
+
       new VariantContextBuilder()
         .chr(contig)
         .start(position + 1) // one based based inclusive
@@ -264,10 +277,9 @@ object SomaticJoint {
           new GenotypeBuilder(sampleName)
             .alleles(JavaConversions.seqAsJavaList(Seq(genotype._1, genotype._2).map(makeHtsjdkAllele _)))
             .AD(alleles.map(allelicDepths.getOrElse(_, 0)).toArray)
-            .PL(GermlineSmallVariantCall.unnormalizedLogProbsToNormalizedPhred(
-              possibleGenotypes.map(
-                value => logUnnormalizedPosteriors.getOrElse(value, Double.NegativeInfinity))).toArray)
+            .PL(genotypeLikelihoods.toArray)
             .DP(depth)
+            .GQ(genotypeQuality.toInt)
             .attribute("RL", logUnnormalizedPosteriors.map(
               pair => "%s/%s=%1.2f".format(pair._1._1, pair._1._2, pair._2)).mkString(" "))
             .make)
@@ -277,14 +289,10 @@ object SomaticJoint {
   }
 
   object GermlineSmallVariantCall {
-    def unnormalizedLogProbsToNormalizedPhred(log10Probabilities: Seq[Double], log10Precision: Double = -16): Seq[Double] = {
-      // See: http://stats.stackexchange.com/questions/66616/converting-normalizing-very-small-likelihood-values-to-probability
-      // val threshold = log10Precision - math.log10(log10Probabilities.length.toDouble)
+    def logPosteriorsToNormalizedPhred(log10Probabilities: Seq[Double], log10Precision: Double = -16): Seq[Double] = {
       val max = log10Probabilities.max
       val rescaled = log10Probabilities.map(_ - max)
-      val exponentials = rescaled.map(math.pow(10, _))
-      val sum = exponentials.sum
-      exponentials.map(value => math.log10(1 - (value / sum)) * -10.0)
+      rescaled.map(_ * -10)
     }
 
     def writeVcf(path: String, sampleName: String, readSets: Seq[ReadSet], calls: Iterable[GermlineSmallVariantCall]) = {
@@ -299,6 +307,7 @@ object SomaticJoint {
       headerLines.add(new VCFFormatHeaderLine("PL", VCFHeaderLineCount.G, VCFHeaderLineType.Integer,
         "Phred scaled genotype likelihoods"))
       headerLines.add(new VCFFormatHeaderLine("DP", 1, VCFHeaderLineType.Integer, "Total depth"))
+      headerLines.add(new VCFFormatHeaderLine("GQ", 1, VCFHeaderLineType.Integer, "Genotype quality"))
 
       // nonstandard
       headerLines.add(new VCFFormatHeaderLine("RL", 1, VCFHeaderLineType.String, "Unnormalized log10 genotype posteriors"))
@@ -329,10 +338,20 @@ object SomaticJoint {
         inputs.foreach(input => println(input))
       }
 
+      val reference = Option(args.referenceFastaPath).map(ReferenceBroadcast(_, sc))
+      if (reference.isEmpty) {
+        throw new IllegalArgumentException("Reference fasta required")
+      }
+
       val readSets = inputs.zipWithIndex.map({
         case (input, index) => ReadSet(
           sc,
-          input.path, false, Read.InputFilters.empty, token = index, contigLengthsFromDictionary = !args.noSequenceDictionary)
+          input.path,
+          false,
+          Read.InputFilters.empty,
+          token = index,
+          contigLengthsFromDictionary = !args.noSequenceDictionary,
+          referenceGenome = reference)
       })
 
       assert(readSets.forall(_.sequenceDictionary == readSets(0).sequenceDictionary),
@@ -353,8 +372,6 @@ object SomaticJoint {
           forceCallLoci.truncatedString()))
       }
 
-      readSets(0).source
-
       val broadcastForceCallLoci = sc.broadcast(forceCallLoci)
       val lociPartitions = DistributedUtil.partitionLociAccordingToArgs(args, loci, readSets.map(_.mappedReads): _*)
       val groupedInputs = GroupedInputs(inputs)
@@ -373,7 +390,7 @@ object SomaticJoint {
           } else {
             Iterator.empty
           }
-        }).collect
+        }, referenceGenome = reference).collect
 
       Common.progress("Called %,d germline variants.".format(germlineCalls.length))
 

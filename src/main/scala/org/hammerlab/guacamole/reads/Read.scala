@@ -189,10 +189,9 @@ object Read extends Logging {
     }).intern
 
     if (isMapped) {
-      val mdTagString =
+      val mdTagString = Option(record.getStringAttribute("MD")).orElse(
         referenceGenome.map(
-          _.buildMdTag(record.getReadString, record.getReferenceName, record.getAlignmentStart - 1, record.getCigar)
-        ).orElse(Option(record.getStringAttribute("MD")))
+          _.buildMdTag(record.getReadString, record.getReferenceName, record.getAlignmentStart - 1, record.getCigar)))
 
       if (!mdTagString.isDefined && requireMDTagsOnMappedReads) {
         throw MissingMDTagException(record)
