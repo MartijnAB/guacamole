@@ -189,7 +189,7 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
     val resultFile = tempFile(".vcf")
     println(resultFile)
 
-    if (true) {
+    if (false) {
       val args = new SomaticJoint.Arguments()
       args.outSmallGermlineVariants = resultFile
       args.inputs = Seq(na12878_subset_bam).toArray
@@ -206,10 +206,16 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
 
     println("Guacamole calls: %,d. Gold calls: %,d.".format(recordsGuacamole.length, recordsExpected.length))
 
+    def onlyIndels(calls: Seq[VariantContext]): Seq[VariantContext] = {
+      calls.filter(call => call.getReference.length != 1 ||
+        JavaConversions.collectionAsScalaIterable(call.getAlternateAlleles).exists(_.length != 1))
+    }
+
     val comparisonFull = VCFComparison(recordsExpected, recordsGuacamole)
     val comparisonPlatinumOnly = VCFComparison(
       recordsExpected.filter(_.getAttributeAsString("metal", "") == "platinum"),
       recordsGuacamole)
+    val comparisonFullIndels = VCFComparison(onlyIndels(recordsExpected), onlyIndels(recordsGuacamole))
 
     println("Sensitivity on platinum: %f".format(comparisonPlatinumOnly.sensitivity))
     println("Specificity on full: %f".format(comparisonFull.specificity))
@@ -226,7 +232,11 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
       pair => !pair._2.getGenotype(0).isHomRef))
     println()
 
-    println(comparisonFull.summary)
+    println("INDEL PERFORMANCE")
+    println(comparisonFullIndels.summary)
+
+    println("INDEL EXACT MATCHES")
+    printSamplePairs(comparisonFullIndels.exactMatch)
 
   }
 }
