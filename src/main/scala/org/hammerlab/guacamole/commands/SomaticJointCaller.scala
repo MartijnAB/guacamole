@@ -202,6 +202,7 @@ object SomaticJoint {
     var topAlt = ""
     var secondAlt = ""
     var genotype = ("N", "N")
+    def topAltAllelicFraction = Seq(genotype._1, genotype._2).count(_ == topAlt) * 0.5
 
     // Additional diagnostic info.
     var allelicDepths = Map[String, Int]()
@@ -218,7 +219,17 @@ object SomaticJoint {
 
       // We evaluate these models: (1) hom ref (2) het (3) hom alt (4) compound alt.
       // TODO: integrate strand bias into this likelihood.
-      allelicDepths = elements.groupBy(element => Bases.basesToString(element.sequencedBases).toUpperCase).mapValues(_.size)
+      allelicDepths = elements.groupBy(element => {
+        val sequence = Bases.basesToString(element.sequencedBases).toUpperCase
+        sequence
+        /*
+        if (sequence.isEmpty) {
+          if (element.isMidDeletion) "mid-deletion" else "start-deletion"
+        } else {
+          sequence
+        }
+        */
+      }).mapValues(_.size)
       val nonRefAlleles = allelicDepths.filterKeys(_ != ref).toSeq.sortBy(_._2 * -1).map(_._1)
 
       topAlt = nonRefAlleles.headOption.getOrElse("N")
@@ -226,11 +237,6 @@ object SomaticJoint {
 
       //val logMutationPrior = math.log10(mutationPrior)
       //val logNotMutationPrior = Seq(log10NotHeterozygousPrior, log10 math.log10(1 - mutationPrior)
-
-      // TODO: get rid of this, and handle indels.
-      if (topAlt.length != 1 || secondAlt.length != 1) {
-        return false
-      }
 
       // The following are not true posterior probabilities, but are proportional to posteriors.
       // Map from alleles to log probs.
@@ -258,8 +264,7 @@ object SomaticJoint {
       val alleles = Seq(ref, genotype._1, genotype._2).distinct
 
       // If there is a true second alt with evidence, the PL field will have 4 values (hom ref, het, hom alt, compound
-      // alt), otherwise just 3. The 4-allele version seems to be different than what e.g. the GATK does, but is
-      // more useful.
+      // alt), otherwise just 3. GATK always gives the 3-genotype version.
       val possibleGenotypes = Seq((ref, ref), (ref, topAlt), (topAlt, topAlt)) ++
         (if (secondAlt != "N") Seq((topAlt, secondAlt)) else Seq.empty)
 
@@ -268,6 +273,9 @@ object SomaticJoint {
           value => logUnnormalizedPosteriors.getOrElse(value, Double.NegativeInfinity))).map(_.toInt)
 
       val genotypeQuality = genotypeLikelihoods.sorted.seq(1)
+
+      assert(genotype._1.nonEmpty)
+      assert(genotype._2.nonEmpty)
 
       new VariantContextBuilder()
         .chr(contig)
@@ -295,7 +303,79 @@ object SomaticJoint {
       rescaled.map(_ * -10)
     }
 
-    def writeVcf(path: String, sampleName: String, readSets: Seq[ReadSet], calls: Iterable[GermlineSmallVariantCall]) = {
+    def normalizeDeletions(reference: ReferenceBroadcast, calls: Iterable[GermlineSmallVariantCall]): Iterable[GermlineSmallVariantCall] = {
+      def makeDeletion(calls: Seq[GermlineSmallVariantCall]): GermlineSmallVariantCall = {
+        val start = calls.head
+        val end = calls.last
+        assume(start.contig == end.contig)
+        assume(end.position >= start.position)
+        assume(start.topAlt.isEmpty)
+        assume(end.topAlt.isEmpty)
+        assume(calls.forall(_.topAltAllelicFraction == start.topAltAllelicFraction))
+
+        val refSequence = Bases.basesToString(
+          reference.getReferenceSequence(start.contig, start.position.toInt - 1, end.position.toInt)).toUpperCase
+
+        def convertAllele(allele: String) =
+          start.ref(0).toString + allele
+
+        start.position = start.position - 1
+        start.ref = refSequence
+        start.topAlt = convertAllele(start.topAlt)
+        start.genotype = (convertAllele(start.genotype._1), convertAllele(start.genotype._2))
+        start.allelicDepths = start.allelicDepths.map(pair => convertAllele(pair._1) -> pair._2)
+        start.logUnnormalizedPosteriors = start.logUnnormalizedPosteriors.map(
+          pair => (convertAllele(pair._1._1), convertAllele(pair._1._2)) -> pair._2)
+        start
+      }
+
+      val results = ArrayBuffer[GermlineSmallVariantCall]()
+      val currentDeletion = ArrayBuffer.empty[GermlineSmallVariantCall]
+      calls.foreach(call => {
+        val deletionContinuation = call.topAlt.isEmpty &&
+            currentDeletion.lastOption.exists(last =>
+              last.position == call.position - 1 &&
+              last.contig == call.contig &&
+              last.topAltAllelicFraction == call.topAltAllelicFraction)
+
+        if (deletionContinuation) {
+          // Continuing a deletion.
+          currentDeletion += call
+        } else if (currentDeletion.nonEmpty) {
+          // Ending a deletion
+          results += makeDeletion(currentDeletion)
+          currentDeletion.clear()
+        }
+
+        if (call.genotype == (call.topAlt, call.secondAlt) && call.secondAlt.isEmpty) {
+          // Compound variant where the second alternate is a deletion. For now we skip these.
+        } else if (call.topAlt.nonEmpty) {
+          // A simple non-deletion call.
+          results += call
+        } else if (!deletionContinuation) {
+          // Starting a deletion
+          assert(currentDeletion.isEmpty)
+          currentDeletion += call
+        }
+      })
+      if (currentDeletion.nonEmpty) {
+        // End the final deletion.
+        results += makeDeletion(currentDeletion)
+        currentDeletion.clear()
+      }
+      results.foreach(result => {
+        assert(result.genotype._1.nonEmpty)
+        assert(result.genotype._2.nonEmpty)
+      })
+      results.result
+    }
+
+    def writeVcf(
+                  path: String,
+                  sampleName: String,
+                  readSets: Seq[ReadSet],
+                  calls: Iterable[GermlineSmallVariantCall],
+                  reference: ReferenceBroadcast) = {
       val writer = new VariantContextWriterBuilder()
         .setOutputFile(path)
         .setReferenceDictionary(readSets(0).sequenceDictionary.get.toSAMSequenceDictionary)
@@ -319,8 +399,18 @@ object SomaticJoint {
       header.addMetaDataLine(new VCFHeaderLine("Caller", "Guacamole"))
       writer.writeHeader(header)
 
-      calls.foreach(call => {
-        writer.add(call.toHtsjdVariantContext(sampleName))
+      val normalizedCalls = normalizeDeletions(reference, calls)
+
+      var prevChr = ""
+      var prevStart = -1
+      normalizedCalls.foreach(call => {
+        val variantContext = call.toHtsjdVariantContext(sampleName)
+        if (prevChr == variantContext.getChr) {
+          assert(variantContext.getStart >= prevStart)
+        }
+        prevChr = variantContext.getChr
+        prevStart = variantContext.getStart
+        writer.add(variantContext)
       })
       writer.close()
     }
@@ -397,7 +487,8 @@ object SomaticJoint {
 
       if (args.outSmallGermlineVariants.nonEmpty) {
         Common.progress("Writing germline variants.")
-        GermlineSmallVariantCall.writeVcf(args.outSmallGermlineVariants, args.normalSampleName, readSets, germlineCalls)
+        GermlineSmallVariantCall.writeVcf(
+          args.outSmallGermlineVariants, args.normalSampleName, readSets, germlineCalls, reference.get)
       }
       Common.progress("Wrote %,d calls to %s".format(germlineCalls.length, args.outSmallGermlineVariants))
     }
