@@ -191,72 +191,21 @@ object SomaticJoint {
     loglikelihoods.sum
   }
 
-  class GermlineSmallVariantCall(negativeLog10HeterozygousPrior: Double = 2,
-                                 negativeLog10HomozygousAlternatePrior: Double = 2,
-                                 negativeLog10CompoundAlternatePrior: Double = 4) {
+  case class GermlineCharacterization(
+                                     contig: String,
+                                     position: Long,
+                                     ref: String,
+                                     topAlt: String,
+                                     secondAlt: String,
+                                     genotype: (String, String),
+                                     allelicDepths: Map[String, Int],
+                                     depth: Int,
+                                     logUnnormalizedPosteriors: Map[(String, String), Double]) {
 
-    // Essential information.
-    var contig = ""
-    var position = -1L
-    var ref = ""
-    var topAlt = ""
-    var secondAlt = ""
-    var genotype = ("N", "N")
-    def topAltAllelicFraction = Seq(genotype._1, genotype._2).count(_ == topAlt) * 0.5
+    def topAltAllelicFraction =
+      Seq(genotype._1, genotype._2).count(_ == topAlt) * 0.5
 
-    // Additional diagnostic info.
-    var allelicDepths = Map[String, Int]()
-    var depth = -1
-    var logUnnormalizedPosteriors = Map[(String, String), Double]()
-
-    def call(normalDNAPileups: Seq[Pileup]): Boolean = {
-      val elements = normalDNAPileups.flatMap(_.elements)
-      depth = elements.length
-
-      contig = normalDNAPileups(0).referenceName
-      position = normalDNAPileups(0).locus
-      ref = Bases.baseToString(normalDNAPileups(0).referenceBase).toUpperCase
-
-      // We evaluate these models: (1) hom ref (2) het (3) hom alt (4) compound alt.
-      // TODO: integrate strand bias into this likelihood.
-      allelicDepths = elements.groupBy(element => {
-        val sequence = Bases.basesToString(element.sequencedBases).toUpperCase
-        sequence
-        /*
-        if (sequence.isEmpty) {
-          if (element.isMidDeletion) "mid-deletion" else "start-deletion"
-        } else {
-          sequence
-        }
-        */
-      }).mapValues(_.size)
-      val nonRefAlleles = allelicDepths.filterKeys(_ != ref).toSeq.sortBy(_._2 * -1).map(_._1)
-
-      topAlt = nonRefAlleles.headOption.getOrElse("N")
-      secondAlt = if (nonRefAlleles.size > 1) nonRefAlleles(1) else "N"
-
-      //val logMutationPrior = math.log10(mutationPrior)
-      //val logNotMutationPrior = Seq(log10NotHeterozygousPrior, log10 math.log10(1 - mutationPrior)
-
-      // The following are not true posterior probabilities, but are proportional to posteriors.
-      // Map from alleles to log probs.
-      logUnnormalizedPosteriors = Map(
-        // Homozygous reference
-        (ref, ref) -> (logLikelihoodPileup(elements, Map(ref -> 1.0))),
-
-        // Het
-        (ref, topAlt) -> (logLikelihoodPileup(elements, Map(ref -> 0.5, topAlt -> 0.5)) - negativeLog10HeterozygousPrior),
-
-        // Homozygous alt
-        (topAlt, topAlt) -> (logLikelihoodPileup(elements, Map(topAlt -> 1.0)) - negativeLog10HomozygousAlternatePrior),
-
-        // Compound alt
-        (topAlt, secondAlt) ->
-          (logLikelihoodPileup(elements, Map(topAlt -> 0.5, secondAlt -> 0.5)) - negativeLog10CompoundAlternatePrior)
-      )
-      genotype = logUnnormalizedPosteriors.toSeq.maxBy(_._2)._1
-      genotype != (ref, ref) && topAlt != "N"
-    }
+    def isVariant = genotype != (ref, ref) && topAlt != "N"
 
     def toHtsjdVariantContext(sampleName: String): VariantContext = {
       def makeHtsjdkAllele(allele: String): Allele = Allele.create(allele, allele == ref)
@@ -268,7 +217,7 @@ object SomaticJoint {
       val possibleGenotypes = Seq((ref, ref), (ref, topAlt), (topAlt, topAlt)) ++
         (if (secondAlt != "N") Seq((topAlt, secondAlt)) else Seq.empty)
 
-      val genotypeLikelihoods = GermlineSmallVariantCall.logPosteriorsToNormalizedPhred(
+      val genotypeLikelihoods = GermlineCharacterization.logPosteriorsToNormalizedPhred(
         possibleGenotypes.map(
           value => logUnnormalizedPosteriors.getOrElse(value, Double.NegativeInfinity))).map(_.toInt)
 
@@ -296,15 +245,66 @@ object SomaticJoint {
     }
   }
 
-  object GermlineSmallVariantCall {
+  object GermlineCharacterization {
+    case class Parameters(negativeLog10HeterozygousPrior: Double = 2,
+                          negativeLog10HomozygousAlternatePrior: Double = 2,
+                          negativeLog10CompoundAlternatePrior: Double = 4)
+    {}
+    val default = Parameters()
+
+    def apply(normalDNAPileups: Seq[Pileup], parameters: Parameters = default): GermlineCharacterization = {
+
+      val elements = normalDNAPileups.flatMap(_.elements)
+      val depth = elements.length
+      val ref = Bases.baseToString(normalDNAPileups(0).referenceBase).toUpperCase
+
+      // We evaluate these models: (1) hom ref (2) het (3) hom alt (4) compound alt.
+      // TODO: integrate strand bias into this likelihood.
+      val allelicDepths = elements.groupBy(element => {
+        Bases.basesToString(element.sequencedBases).toUpperCase
+      }).mapValues(_.size)
+      val nonRefAlleles = allelicDepths.filterKeys(_ != ref).toSeq.sortBy(_._2 * -1).map(_._1)
+
+      val topAlt = nonRefAlleles.headOption.getOrElse("N")
+      val secondAlt = if (nonRefAlleles.size > 1) nonRefAlleles(1) else "N"
+
+      // The following are not true posterior probabilities, but are proportional to posteriors.
+      // Map from alleles to log probs.
+      val logUnnormalizedPosteriors = Map(
+        // Homozygous reference
+        (ref, ref) -> (logLikelihoodPileup(elements, Map(ref -> 1.0))),
+
+        // Het
+        (ref, topAlt) -> (logLikelihoodPileup(elements, Map(ref -> 0.5, topAlt -> 0.5)) - parameters.negativeLog10HeterozygousPrior),
+
+        // Homozygous alt
+        (topAlt, topAlt) -> (logLikelihoodPileup(elements, Map(topAlt -> 1.0)) - parameters.negativeLog10HomozygousAlternatePrior),
+
+        // Compound alt
+        (topAlt, secondAlt) ->
+          (logLikelihoodPileup(elements, Map(topAlt -> 0.5, secondAlt -> 0.5)) - parameters.negativeLog10CompoundAlternatePrior)
+      )
+      val genotype = logUnnormalizedPosteriors.toSeq.maxBy(_._2)._1
+      GermlineCharacterization(
+        normalDNAPileups(0).referenceName,
+        normalDNAPileups(0).locus,
+        ref,
+        topAlt,
+        secondAlt,
+        genotype,
+        allelicDepths,
+        depth,
+        logUnnormalizedPosteriors)
+    }
+
     def logPosteriorsToNormalizedPhred(log10Probabilities: Seq[Double], log10Precision: Double = -16): Seq[Double] = {
       val max = log10Probabilities.max
       val rescaled = log10Probabilities.map(_ - max)
       rescaled.map(_ * -10)
     }
 
-    def normalizeDeletions(reference: ReferenceBroadcast, calls: Iterable[GermlineSmallVariantCall]): Iterable[GermlineSmallVariantCall] = {
-      def makeDeletion(calls: Seq[GermlineSmallVariantCall]): GermlineSmallVariantCall = {
+    def normalizeDeletions(reference: ReferenceBroadcast, calls: Iterable[GermlineCharacterization]): Iterable[GermlineCharacterization] = {
+      def makeDeletion(calls: Seq[GermlineCharacterization]): GermlineCharacterization = {
         val start = calls.head
         val end = calls.last
         assume(start.contig == end.contig)
@@ -319,18 +319,22 @@ object SomaticJoint {
         def convertAllele(allele: String) =
           start.ref(0).toString + allele
 
-        start.position = start.position - 1
-        start.ref = refSequence
-        start.topAlt = convertAllele(start.topAlt)
-        start.genotype = (convertAllele(start.genotype._1), convertAllele(start.genotype._2))
-        start.allelicDepths = start.allelicDepths.map(pair => convertAllele(pair._1) -> pair._2)
-        start.logUnnormalizedPosteriors = start.logUnnormalizedPosteriors.map(
-          pair => (convertAllele(pair._1._1), convertAllele(pair._1._2)) -> pair._2)
-        start
+        GermlineCharacterization(
+          start.contig,
+          start.position - 1,
+          refSequence,
+          convertAllele(start.topAlt),
+          convertAllele(start.secondAlt),
+          (convertAllele(start.genotype._1), convertAllele(start.genotype._2)),
+          start.allelicDepths.map(pair => convertAllele(pair._1) -> pair._2),
+          start.depth,
+          start.logUnnormalizedPosteriors.map(
+            pair => (convertAllele(pair._1._1), convertAllele(pair._1._2)) -> pair._2))
+
       }
 
-      val results = ArrayBuffer[GermlineSmallVariantCall]()
-      val currentDeletion = ArrayBuffer.empty[GermlineSmallVariantCall]
+      val results = ArrayBuffer[GermlineCharacterization]()
+      val currentDeletion = ArrayBuffer.empty[GermlineCharacterization]
       calls.foreach(call => {
         val deletionContinuation = call.topAlt.isEmpty &&
             currentDeletion.lastOption.exists(last =>
@@ -374,7 +378,7 @@ object SomaticJoint {
                   path: String,
                   sampleName: String,
                   readSets: Seq[ReadSet],
-                  calls: Iterable[GermlineSmallVariantCall],
+                  calls: Iterable[GermlineCharacterization],
                   reference: ReferenceBroadcast) = {
       val writer = new VariantContextWriterBuilder()
         .setOutputFile(path)
@@ -473,20 +477,17 @@ object SomaticJoint {
         lociPartitions,
         false, // skip empty
         pileups => {
-          val maybeCall = new GermlineSmallVariantCall()
-          val called = maybeCall.call(groupedInputs.normalDNA.map(pileups(_)))
-          if (called || broadcastForceCallLoci.value.onContig(pileups(0).referenceName).contains(pileups(0).locus)) {
-            Iterator(maybeCall)
-          } else {
-            Iterator.empty
-          }
+          val characterization = GermlineCharacterization(groupedInputs.normalDNA.map(pileups(_)))
+          val emit = (characterization.isVariant
+            || broadcastForceCallLoci.value.onContig(pileups(0).referenceName).contains(pileups(0).locus))
+          if (emit) Iterator(characterization) else Iterator.empty
         }, referenceGenome = reference).collect
 
       Common.progress("Called %,d germline variants.".format(germlineCalls.length))
 
       if (args.outSmallGermlineVariants.nonEmpty) {
         Common.progress("Writing germline variants.")
-        GermlineSmallVariantCall.writeVcf(
+        GermlineCharacterization.writeVcf(
           args.outSmallGermlineVariants, args.normalSampleName, readSets, germlineCalls, reference.get)
       }
       Common.progress("Wrote %,d calls to %s".format(germlineCalls.length, args.outSmallGermlineVariants))
