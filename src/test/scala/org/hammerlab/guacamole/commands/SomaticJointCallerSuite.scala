@@ -126,7 +126,7 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
               partialMatch += ((record1, record2))
             }
           }
-          case None => (unique += record1)
+          case None => unique += record1
         }
       })
     }
@@ -189,7 +189,7 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
     val resultFile = tempFile(".vcf")
     println(resultFile)
 
-    if (false) {
+    if (true) {
       val args = new SomaticJoint.Arguments()
       args.outSmallGermlineVariants = resultFile
       args.inputs = Seq(na12878_subset_bam).toArray
