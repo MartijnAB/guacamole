@@ -238,5 +238,15 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
     println("INDEL EXACT MATCHES")
     printSamplePairs(comparisonFullIndels.exactMatch)
 
+    println("INDEL MISSED CALLS WITH DEPTH")
+    printSamplePairs(comparisonFullIndels.partialMatch.filter(
+      pair => pair._2.getGenotype(0).isHomRef && pair._2.getGenotype(0).getDP > 5))
+    println()
+
+    println("INDEL BAD CALLS")
+    printSamplePairs(comparisonFullIndels.partialMatch.filter(
+      pair => !pair._2.getGenotype(0).isHomRef))
+    println()
+
   }
 }

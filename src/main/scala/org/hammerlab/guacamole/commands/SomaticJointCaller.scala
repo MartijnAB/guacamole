@@ -24,6 +24,7 @@ import htsjdk.samtools.util.Locus
 import htsjdk.variant.variantcontext.{ GenotypeBuilder, Allele, VariantContextBuilder, VariantContext }
 import htsjdk.variant.variantcontext.writer.VariantContextWriterBuilder
 import htsjdk.variant.vcf._
+import org.apache.commons.math3.util.ArithmeticUtils
 import org.apache.http.client.utils.URLEncodedUtils
 import org.apache.spark.SparkContext
 import org.bdgenomics.adam.util.PhredUtils
@@ -34,7 +35,7 @@ import org.hammerlab.guacamole._
 import org.hammerlab.guacamole.reference.ReferenceBroadcast
 import org.kohsuke.args4j.{ Option => Args4jOption, Argument }
 
-import scala.collection.JavaConversions
+import scala.collection.{mutable, JavaConversions}
 import scala.collection.mutable.ArrayBuffer
 
 object SomaticJoint {
@@ -178,12 +179,11 @@ object SomaticJoint {
       } else {
         val mixtureFrequency = mixture.get(Bases.basesToString(element.sequencedBases)).getOrElse(0.0)
 
-        // Very low mapping or base qualities can cause probabilityCorrect low or even 0. We do not allow it to be < 0.5.
         val probabilityCorrect =
-          math.max(PhredUtils.phredToSuccessProbability(element.qualityScore) * element.read.alignmentLikelihood, 0.5)
+          PhredUtils.phredToSuccessProbability(element.qualityScore) * element.read.alignmentLikelihood
 
         val loglikelihood = math.log10(
-          mixtureFrequency * probabilityCorrect + (1 - mixtureFrequency) * (1 - probabilityCorrect) / 3.0)
+          mixtureFrequency * probabilityCorrect + (1 - mixtureFrequency) * (1 - probabilityCorrect))
         loglikelihood
       }
     }
@@ -198,7 +198,7 @@ object SomaticJoint {
                                      topAlt: String,
                                      secondAlt: String,
                                      genotype: (String, String),
-                                     allelicDepths: Map[String, Int],
+                                     allelicDepths: Map[String, (Int, Int)],  // allele -> (total, positive strand)
                                      depth: Int,
                                      logUnnormalizedPosteriors: Map[(String, String), Double]) {
 
@@ -233,12 +233,19 @@ object SomaticJoint {
         .genotypes(
           new GenotypeBuilder(sampleName)
             .alleles(JavaConversions.seqAsJavaList(Seq(genotype._1, genotype._2).map(makeHtsjdkAllele _)))
-            .AD(alleles.map(allelicDepths.getOrElse(_, 0)).toArray)
+            .AD(alleles.map(allelicDepths.getOrElse(_, (0, 0))).map(_._1).toArray)
             .PL(genotypeLikelihoods.toArray)
             .DP(depth)
             .GQ(genotypeQuality.toInt)
             .attribute("RL", logUnnormalizedPosteriors.map(
               pair => "%s/%s=%1.2f".format(pair._1._1, pair._1._2, pair._2)).mkString(" "))
+           // .attribute("SBP",
+           //   alleles.map(allele => "%s=%1.2f".format(allele, strandBias.getOrElse(allele, 0.0))).mkString(" "))
+            .attribute("ADP",
+              alleles.map(allele => {
+                val totalAndPositive = allelicDepths.getOrElse(allele, (0, 0))
+                "%s=%d/%d".format(allele, totalAndPositive._2, totalAndPositive._1)
+              }).mkString(" "))
             .make)
         .alleles(JavaConversions.seqAsJavaList(alleles.map(makeHtsjdkAllele _)))
         .make
@@ -254,16 +261,25 @@ object SomaticJoint {
 
     def apply(normalDNAPileups: Seq[Pileup], parameters: Parameters = default): GermlineCharacterization = {
 
-      val elements = normalDNAPileups.flatMap(_.elements)
+      val elements = normalDNAPileups.flatMap(_.elements).filter(_.read.alignmentQuality > 0)
       val depth = elements.length
       val ref = Bases.baseToString(normalDNAPileups(0).referenceBase).toUpperCase
 
       // We evaluate these models: (1) hom ref (2) het (3) hom alt (4) compound alt.
-      // TODO: integrate strand bias into this likelihood.
-      val allelicDepths = elements.groupBy(element => {
+      // Map from allele -> (num total supporting reads, num positive strand supporting reads, downsampled elements)
+      val allelicDepthsAndSubsampled = elements.sortBy(_.qualityScore * -1).groupBy(element => {
         Bases.basesToString(element.sequencedBases).toUpperCase
-      }).mapValues(_.size)
-      val nonRefAlleles = allelicDepths.filterKeys(_ != ref).toSeq.sortBy(_._2 * -1).map(_._1)
+      }).mapValues(items => {
+        val positive = items.filter(_.read.isPositiveStrand)
+        val negative = items.filter(!_.read.isPositiveStrand)
+        val numToTake = Math.max(Math.min(positive.size, negative.size), 3)
+        val adjustedItems = positive.take(numToTake) ++ negative.take(numToTake)
+        (items.size, positive.size, adjustedItems)
+      })
+      val allelicDepths = allelicDepthsAndSubsampled.mapValues(item => (item._1, item._2))
+      val downsampledElements = allelicDepthsAndSubsampled.mapValues(_._3).values.flatten
+
+      val nonRefAlleles = allelicDepths.filterKeys(_ != ref).toSeq.sortBy(_._2._1 * -1).map(_._1)
 
       val topAlt = nonRefAlleles.headOption.getOrElse("N")
       val secondAlt = if (nonRefAlleles.size > 1) nonRefAlleles(1) else "N"
@@ -271,20 +287,29 @@ object SomaticJoint {
       // The following are not true posterior probabilities, but are proportional to posteriors.
       // Map from alleles to log probs.
       val logUnnormalizedPosteriors = Map(
-        // Homozygous reference
-        (ref, ref) -> (logLikelihoodPileup(elements, Map(ref -> 1.0))),
+        // Homozygous reference.
+        (ref, ref) -> (
+          logLikelihoodPileup(downsampledElements, Map(ref -> 1.0))),
 
         // Het
-        (ref, topAlt) -> (logLikelihoodPileup(elements, Map(ref -> 0.5, topAlt -> 0.5)) - parameters.negativeLog10HeterozygousPrior),
+        (ref, topAlt) -> (
+          logLikelihoodPileup(downsampledElements, Map(ref -> 0.5, topAlt -> 0.5))
+            - parameters.negativeLog10HeterozygousPrior),
 
         // Homozygous alt
-        (topAlt, topAlt) -> (logLikelihoodPileup(elements, Map(topAlt -> 1.0)) - parameters.negativeLog10HomozygousAlternatePrior),
+        (topAlt, topAlt) -> (
+          logLikelihoodPileup(downsampledElements, Map(topAlt -> 1.0))
+            - parameters.negativeLog10HomozygousAlternatePrior),
 
         // Compound alt
-        (topAlt, secondAlt) ->
-          (logLikelihoodPileup(elements, Map(topAlt -> 0.5, secondAlt -> 0.5)) - parameters.negativeLog10CompoundAlternatePrior)
+        (topAlt, secondAlt) -> (
+          logLikelihoodPileup(downsampledElements, Map(topAlt -> 0.5, secondAlt -> 0.5))
+            - parameters.negativeLog10CompoundAlternatePrior)
       )
       val genotype = logUnnormalizedPosteriors.toSeq.maxBy(_._2)._1
+      //if (genotype != (ref, ref)) {
+      //  println("Adjusted %d -> %d".format(elements.size, downsampledElements.size))
+      //}
       GermlineCharacterization(
         normalDNAPileups(0).referenceName,
         normalDNAPileups(0).locus,
@@ -303,21 +328,23 @@ object SomaticJoint {
       rescaled.map(_ * -10)
     }
 
-    def normalizeDeletions(reference: ReferenceBroadcast, calls: Iterable[GermlineCharacterization]): Iterable[GermlineCharacterization] = {
-      def makeDeletion(calls: Seq[GermlineCharacterization]): GermlineCharacterization = {
-        val start = calls.head
-        val end = calls.last
+    def normalizeDeletions(reference: ReferenceBroadcast, calls: Iterable[GermlineCharacterization]): Iterator[GermlineCharacterization] = {
+      def makeDeletion(deletionCalls: Seq[GermlineCharacterization]): GermlineCharacterization = {
+        val start = deletionCalls.head
+        val end = deletionCalls.last
         assume(start.contig == end.contig)
         assume(end.position >= start.position)
         assume(start.topAlt.isEmpty)
         assume(end.topAlt.isEmpty)
-        assume(calls.forall(_.topAltAllelicFraction == start.topAltAllelicFraction))
+        assume(deletionCalls.forall(_.topAltAllelicFraction == start.topAltAllelicFraction))
+
+        val het = start.topAltAllelicFraction == 0.5
 
         val refSequence = Bases.basesToString(
-          reference.getReferenceSequence(start.contig, start.position.toInt - 1, end.position.toInt)).toUpperCase
+          reference.getReferenceSequence(start.contig, start.position.toInt - 1, end.position.toInt + 1)).toUpperCase
 
         def convertAllele(allele: String) =
-          start.ref(0).toString + allele
+          refSequence(0) + allele
 
         GermlineCharacterization(
           start.contig,
@@ -325,7 +352,7 @@ object SomaticJoint {
           refSequence,
           convertAllele(start.topAlt),
           convertAllele(start.secondAlt),
-          (convertAllele(start.genotype._1), convertAllele(start.genotype._2)),
+          if (het) (refSequence, convertAllele("")) else (convertAllele(""), convertAllele("")),
           start.allelicDepths.map(pair => convertAllele(pair._1) -> pair._2),
           start.depth,
           start.logUnnormalizedPosteriors.map(
@@ -333,8 +360,24 @@ object SomaticJoint {
 
       }
 
-      val results = ArrayBuffer[GermlineCharacterization]()
+      val results = mutable.ArrayStack[GermlineCharacterization]()
       val currentDeletion = ArrayBuffer.empty[GermlineCharacterization]
+
+      def maybeEmitDeletion(): Unit = {
+        if (currentDeletion.nonEmpty) {
+          // Ending a deletion
+          val fullDeletion = makeDeletion(currentDeletion)
+          if (results.headOption.exists(_.position == fullDeletion.position)) {
+            // Combining with an existing call
+            // TODO: someday, we may want to attempt to merge SNV and indel calls here.
+            // For now, we just discard the non-indel call.
+            results.pop()
+          }
+          results += fullDeletion
+          currentDeletion.clear()
+        }
+      }
+
       calls.foreach(call => {
         val deletionContinuation = call.topAlt.isEmpty &&
             currentDeletion.lastOption.exists(last =>
@@ -345,10 +388,8 @@ object SomaticJoint {
         if (deletionContinuation) {
           // Continuing a deletion.
           currentDeletion += call
-        } else if (currentDeletion.nonEmpty) {
-          // Ending a deletion
-          results += makeDeletion(currentDeletion)
-          currentDeletion.clear()
+        } else {
+          maybeEmitDeletion()
         }
 
         if (call.genotype == (call.topAlt, call.secondAlt) && call.secondAlt.isEmpty) {
@@ -362,16 +403,12 @@ object SomaticJoint {
           currentDeletion += call
         }
       })
-      if (currentDeletion.nonEmpty) {
-        // End the final deletion.
-        results += makeDeletion(currentDeletion)
-        currentDeletion.clear()
-      }
+      maybeEmitDeletion()
       results.foreach(result => {
         assert(result.genotype._1.nonEmpty)
         assert(result.genotype._2.nonEmpty)
       })
-      results.result
+      results.reverseIterator
     }
 
     def writeVcf(
@@ -395,6 +432,8 @@ object SomaticJoint {
 
       // nonstandard
       headerLines.add(new VCFFormatHeaderLine("RL", 1, VCFHeaderLineType.String, "Unnormalized log10 genotype posteriors"))
+      headerLines.add(new VCFFormatHeaderLine("SBP", 1, VCFHeaderLineType.String, "log10 strand bias p-values"))
+      headerLines.add(new VCFFormatHeaderLine("ADP", 1, VCFHeaderLineType.String, "allelic depth as num postiive strand / num total"))
 
       val header = new VCFHeader(headerLines, JavaConversions.seqAsJavaList(Seq(sampleName)))
       header.setSequenceDictionary(readSets(0).sequenceDictionary.get.toSAMSequenceDictionary)
@@ -410,7 +449,8 @@ object SomaticJoint {
       normalizedCalls.foreach(call => {
         val variantContext = call.toHtsjdVariantContext(sampleName)
         if (prevChr == variantContext.getChr) {
-          assert(variantContext.getStart >= prevStart)
+          assert(variantContext.getStart >= prevStart,
+            "Out of order: expected %d >= %d".format(variantContext.getStart, prevStart))
         }
         prevChr = variantContext.getChr
         prevStart = variantContext.getStart
