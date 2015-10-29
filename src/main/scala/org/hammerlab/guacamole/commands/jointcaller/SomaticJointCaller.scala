@@ -22,7 +22,7 @@ import java.util
 
 import htsjdk.samtools.util.Locus
 import htsjdk.variant.variantcontext.writer.VariantContextWriterBuilder
-import htsjdk.variant.variantcontext.{Allele, GenotypeBuilder, VariantContext, VariantContextBuilder}
+import htsjdk.variant.variantcontext.{ Allele, GenotypeBuilder, VariantContext, VariantContextBuilder }
 import htsjdk.variant.vcf._
 import org.apache.http.client.utils.URLEncodedUtils
 import org.apache.spark.SparkContext
@@ -32,10 +32,10 @@ import org.hammerlab.guacamole._
 import org.hammerlab.guacamole.pileup._
 import org.hammerlab.guacamole.reads._
 import org.hammerlab.guacamole.reference.ReferenceBroadcast
-import org.kohsuke.args4j.{Argument, Option => Args4jOption}
+import org.kohsuke.args4j.{ Argument, Option => Args4jOption }
 
 import scala.collection.mutable.ArrayBuffer
-import scala.collection.{JavaConversions, mutable}
+import scala.collection.{ JavaConversions, mutable }
 
 object SomaticJoint {
   class Arguments extends DistributedUtil.Arguments with NoSequenceDictionary {
@@ -168,12 +168,11 @@ object SomaticJoint {
           val emitGermlineCall = (
             emitGermlineCalls && (
               germlineCharacterization.isVariant ||
-                broadcastForceCallLoci.value.onContig(pileups(0).referenceName).contains(pileups(0).locus)))
+              broadcastForceCallLoci.value.onContig(pileups(0).referenceName).contains(pileups(0).locus)))
           if (emitGermlineCall) Iterator(germlineCharacterization) else Iterator.empty
         }, referenceGenome = reference).collect
 
     }
-
 
   }
 
