@@ -65,7 +65,7 @@ case class PileupElement(
   def cigarElementReferenceLength = CigarUtils.getReferenceLength(cigarElement)
   def cigarElementEndLocus = cigarElementLocus + cigarElementReferenceLength
 
-    lazy val alignment: Alignment = {
+  lazy val alignment: Alignment = {
 
     /*
      * True if this is the last base of the current cigar element.

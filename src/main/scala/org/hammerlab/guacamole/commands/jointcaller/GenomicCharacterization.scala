@@ -3,7 +3,7 @@ package org.hammerlab.guacamole.commands.jointcaller
 import java.util
 
 import htsjdk.variant.variantcontext.writer.VariantContextWriterBuilder
-import htsjdk.variant.variantcontext.{GenotypeBuilder, VariantContextBuilder, Allele, VariantContext}
+import htsjdk.variant.variantcontext.{ GenotypeBuilder, VariantContextBuilder, Allele, VariantContext }
 import htsjdk.variant.vcf._
 import org.apache.spark.SparkContext
 import org.bdgenomics.adam.util.PhredUtils
@@ -13,14 +13,15 @@ import org.hammerlab.guacamole.commands.jointcaller.Inputs.Input
 import org.hammerlab.guacamole.commands.jointcaller.SomaticJoint.Arguments
 import org.hammerlab.guacamole.{SparkCommand, ReadSet, Bases}
 import org.hammerlab.guacamole.pileup.{PileupElement, Pileup}
+import org.hammerlab.guacamole.{ ReadSet, Bases }
+import org.hammerlab.guacamole.pileup.{ PileupElement, Pileup }
 import org.hammerlab.guacamole.reference.ReferenceBroadcast
 
 import scala.collection.mutable.ArrayBuffer
-import scala.collection.{mutable, JavaConversions}
+import scala.collection.{ mutable, JavaConversions }
 
 trait GenomicCharacterization {
   def toHtsjdVariantContext(sampleName: String): VariantContext
-
 
 }
 
@@ -34,7 +35,7 @@ object GenomicCharacterization {
         val mixtureFrequency = mixture.get(Bases.basesToString(element.sequencedBases)).getOrElse(0.0)
 
         val probabilityCorrect =
-          PhredUtils.phredToSuccessProbability(element.qualityScore) * element.read.alignmentLikelihood
+          PhredUtils.phredToSuccessProbability(element.qualityScore) * element.read.alignmentLikelihood * .99
 
         val loglikelihood = math.log10(
           mixtureFrequency * probabilityCorrect + (1 - mixtureFrequency) * (1 - probabilityCorrect))
@@ -50,7 +51,6 @@ object GenomicCharacterization {
                                      position: Long,
                                      ref: String,
                                      topAlt: String,
-                                     secondAlt: String,
                                      highestLikelihoodMixturesPerSample: PerSample[Map[(String, String), Double]],
                                      allelicDepthsPerSample: PerSample[Map[String, (Int, Int)]]  // allele -> (total, positive strand)
                                       )
@@ -65,13 +65,13 @@ object GenomicCharacterization {
 
     def apply(germlineCharacterization: GermlineCharacterization, tumorDNAPileups: Seq[Pileup], tumorRNAPileups: Seq[Pileup], parameters: Parameters = default): GermlineCharacterization = {
 
+      val individualDNASampleElements = tumorDNAPileups.map(_.elements.filter((_.read.alignmentQuality > 0)))
+      val allDNAElements = individualDNASampleElements.flatten
 
+      val ref = germlineCharacterization.ref
 
-      val elements = tumorDNAPileups.flatMap(_.elements).filter(_.read.alignmentQuality > 0)
-      val depth = elements.length
-      val ref = Bases.baseToString(normalDNAPileups(0).referenceBase).toUpperCase
-
-          Bases.basesToString(element.sequencedBases).toUpperCase
+      val allelicDepthsAndSubsampled = allDNAElements.sortBy(_.qualityScore * -1).groupBy(element => {
+        Bases.basesToString(element.sequencedBases).toUpperCase
       }).mapValues(items => {
         val positive = items.filter(_.read.isPositiveStrand)
         val negative = items.filter(!_.read.isPositiveStrand)
@@ -125,17 +125,16 @@ object GenomicCharacterization {
   */
 
   case class GermlineCharacterization(
-                                       contig: String,
-                                       position: Long,
-                                       ref: String,
-                                       topAlt: String,
-                                       secondAlt: String,
-                                       genotype: (String, String),
-                                       allelicDepths: Map[String, (Int, Int)],  // allele -> (total, positive strand)
-                                       depth: Int,
-                                       logUnnormalizedPosteriors: Map[(String, String), Double])
-    extends GenomicCharacterization
-  {
+    contig: String,
+    position: Long,
+    ref: String,
+    topAlt: String,
+    secondAlt: String,
+    genotype: (String, String),
+    allelicDepths: Map[String, (Int, Int)], // allele -> (total, positive strand)
+    depth: Int,
+    logUnnormalizedPosteriors: Map[(String, String), Double])
+      extends GenomicCharacterization {
 
     def topAltAllelicFraction =
       Seq(genotype._1, genotype._2).count(_ == topAlt) * 0.5
@@ -178,8 +177,8 @@ object GenomicCharacterization {
             .GQ(genotypeQuality.toInt)
             .attribute("RL", logUnnormalizedPosteriors.map(
               pair => "%s/%s=%1.2f".format(pair._1._1, pair._1._2, pair._2)).mkString(" "))
-           // .attribute("SBP",
-           //   alleles.map(allele => "%s=%1.2f".format(allele, strandBias.getOrElse(allele, 0.0))).mkString(" "))
+            // .attribute("SBP",
+            //   alleles.map(allele => "%s=%1.2f".format(allele, strandBias.getOrElse(allele, 0.0))).mkString(" "))
             .attribute("ADP",
               alleles.map(allele => {
                 val totalAndPositive = allelicDepths.getOrElse(allele, (0, 0))
@@ -194,8 +193,7 @@ object GenomicCharacterization {
   object GermlineCharacterization {
     case class Parameters(negativeLog10HeterozygousPrior: Double = 2,
                           negativeLog10HomozygousAlternatePrior: Double = 2,
-                          negativeLog10CompoundAlternatePrior: Double = 4)
-    {}
+                          negativeLog10CompoundAlternatePrior: Double = 4) {}
     val default = Parameters()
 
     def apply(normalDNAPileups: Seq[Pileup], parameters: Parameters = default): GermlineCharacterization = {
@@ -233,17 +231,17 @@ object GenomicCharacterization {
         // Het
         (ref, topAlt) -> (
           logLikelihoodPileup(downsampledElements, Map(ref -> 0.5, topAlt -> 0.5))
-            - parameters.negativeLog10HeterozygousPrior),
+          - parameters.negativeLog10HeterozygousPrior),
 
         // Homozygous alt
         (topAlt, topAlt) -> (
           logLikelihoodPileup(downsampledElements, Map(topAlt -> 1.0))
-            - parameters.negativeLog10HomozygousAlternatePrior),
+          - parameters.negativeLog10HomozygousAlternatePrior),
 
         // Compound alt
         (topAlt, secondAlt) -> (
           logLikelihoodPileup(downsampledElements, Map(topAlt -> 0.5, secondAlt -> 0.5))
-            - parameters.negativeLog10CompoundAlternatePrior)
+          - parameters.negativeLog10CompoundAlternatePrior)
       )
       val genotype = logUnnormalizedPosteriors.toSeq.maxBy(_._2)._1
       //if (genotype != (ref, ref)) {
@@ -351,11 +349,11 @@ object GenomicCharacterization {
     }
 
     def writeVcf(
-                  path: String,
-                  sampleName: String,
-                  readSets: Seq[ReadSet],
-                  calls: Iterable[GermlineCharacterization],
-                  reference: ReferenceBroadcast) = {
+      path: String,
+      sampleName: String,
+      readSets: Seq[ReadSet],
+      calls: Iterable[GermlineCharacterization],
+      reference: ReferenceBroadcast) = {
       val writer = new VariantContextWriterBuilder()
         .setOutputFile(path)
         .setReferenceDictionary(readSets(0).sequenceDictionary.get.toSAMSequenceDictionary)
