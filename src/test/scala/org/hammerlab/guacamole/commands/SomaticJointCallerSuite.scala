@@ -22,7 +22,8 @@ import java.io.File
 
 import htsjdk.variant.variantcontext.VariantContext
 import htsjdk.variant.vcf.VCFFileReader
-import org.hammerlab.guacamole.commands.SomaticJoint.Arguments
+import org.hammerlab.guacamole.commands.jointcaller.SomaticJoint
+import SomaticJoint.Arguments
 import org.hammerlab.guacamole.util.{ TestUtil, GuacFunSuite }
 import org.hammerlab.guacamole.{ LociMap, Bases }
 import org.hammerlab.guacamole.filters.SomaticGenotypeFilter
