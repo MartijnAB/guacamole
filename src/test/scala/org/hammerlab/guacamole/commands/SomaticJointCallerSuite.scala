@@ -51,7 +51,7 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
   }
 
   val na12878_subset_bam = TestUtil.testDataPath(
-    "illumina-platinum-na12878-extract/NA12878.10k_variants.plus_chr1_3M-3.1M.bam")
+    "illumina-platinum-na12878-extract/NA12878.10k_variants.plus_chr1_3M-3.1M.chr_fixed.bam")
 
   val na12878_expected_calls_vcf = TestUtil.testDataPath(
     "illumina-platinum-na12878-extract/NA12878.subset.vcf")
@@ -186,26 +186,14 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
     })
   }
 
-  sparkTest("germline calling on subset of illumina platinum NA12878") {
-    val resultFile = tempFile(".vcf")
-    println(resultFile)
-
-    if (true) {
-      val args = new SomaticJoint.Arguments()
-      args.outSmallGermlineVariants = resultFile
-      args.inputs = Seq(na12878_subset_bam).toArray
-      args.loci = "chr1:0-6700000"
-      args.forceCallLociFromFile = na12878_expected_calls_vcf
-      args.referenceFastaPath = chr1_prefix_fasta
-      SomaticJoint.Caller.run(args, sc)
-    }
+  def printStats(experimentalFile: String): Unit = {
 
     val readerExpected = new VCFFileReader(new File(na12878_expected_calls_vcf), false)
     val recordsExpected = vcfRecords(readerExpected)
-    val reader = new VCFFileReader(new File(resultFile), false)
+    val reader = new VCFFileReader(new File(experimentalFile), false)
     val recordsGuacamole = vcfRecords(reader)
 
-    println("Guacamole calls: %,d. Gold calls: %,d.".format(recordsGuacamole.length, recordsExpected.length))
+    println("Experimental calls: %,d. Gold calls: %,d.".format(recordsGuacamole.length, recordsExpected.length))
 
     def onlyIndels(calls: Seq[VariantContext]): Seq[VariantContext] = {
       calls.filter(call => call.getReference.length != 1 ||
@@ -248,6 +236,33 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
     printSamplePairs(comparisonFullIndels.partialMatch.filter(
       pair => !pair._2.getGenotype(0).isHomRef))
     println()
+
+  }
+
+  sparkTest("germline calling on subset of illumina platinum NA12878") {
+    val resultFile = tempFile(".vcf")
+    println(resultFile)
+
+    if (true) {
+      val args = new SomaticJoint.Arguments()
+      args.outSmallGermlineVariants = resultFile
+      args.inputs = Seq(na12878_subset_bam).toArray
+      args.loci = "chr1:0-6700000"
+      args.forceCallLociFromFile = na12878_expected_calls_vcf
+      args.referenceFastaPath = chr1_prefix_fasta
+      SomaticJoint.Caller.run(args, sc)
+    }
+
+    println("************* GUACAMOLE *************")
+    printStats(resultFile)
+
+    println("************* UNIFIED GENOTYPER *************")
+    printStats(TestUtil.testDataPath(
+      "illumina-platinum-na12878-extract/unified_genotyper.vcf"))
+
+    println("************* HaplotypeCaller *************")
+    printStats(TestUtil.testDataPath(
+      "illumina-platinum-na12878-extract/haplotype_caller.vcf"))
 
   }
 }

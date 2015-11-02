@@ -173,7 +173,6 @@ object SomaticJoint {
           if (emitGermlineCall) Iterator(germlineCharacterization) else Iterator.empty
         }, referenceGenome = reference).collect
        */
-        
 
     }
 
