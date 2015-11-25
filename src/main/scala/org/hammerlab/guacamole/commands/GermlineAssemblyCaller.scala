@@ -130,6 +130,9 @@ object GermlineAssemblyCaller {
       val referenceKmerSource = currentReference.take(kmerSize)
       val referenceKmerSink = currentReference.takeRight(kmerSize)
 
+      if (referenceKmerSource.length != kmerSize || referenceKmerSink.length != kmerSize)
+        return (graph, Iterator.empty)
+
       val paths = currentGraph.depthFirstSearch(
         referenceKmerSource,
         referenceKmerSink
@@ -167,6 +170,8 @@ object GermlineAssemblyCaller {
       val minAlignmentQuality = args.minAlignmentQuality
       val minAverageBaseQuality = args.minAverageBaseQuality
 
+      val reference = ReferenceBroadcast(args.referenceFastaPath, sc)
+
       val lociOfInterest = DistributedUtil.pileupFlatMap[VariantLocus](
         readSet.mappedReads,
         lociPartitions,
@@ -186,7 +191,7 @@ object GermlineAssemblyCaller {
         lociOfInterestSet
       )
 
-      val reference = ReferenceBroadcast(args.referenceFastaPath, sc)
+
       val genotypes: RDD[CalledAllele] =
         DistributedUtil.windowFlatMapWithState[MappedRead, CalledAllele, Option[DeBruijnGraph]](
           Seq(readSet.mappedReads),
