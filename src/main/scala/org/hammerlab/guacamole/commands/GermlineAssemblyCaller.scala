@@ -9,7 +9,6 @@ import org.hammerlab.guacamole.alignment.AlignmentState.AlignmentState
 import org.hammerlab.guacamole.alignment.{AffineGapPenaltyAlignment, AlignmentState, ReadAlignment}
 import org.hammerlab.guacamole.assembly.DeBruijnGraph
 import org.hammerlab.guacamole.filters.GenotypeFilter.GenotypeFilterArguments
-import org.hammerlab.guacamole.filters._
 import org.hammerlab.guacamole.reads.{MappedRead, Read}
 import org.hammerlab.guacamole.reference.{ReferenceBroadcast, ReferenceGenome}
 import org.hammerlab.guacamole.variants.{Allele, AlleleConversions, AlleleEvidence, CalledAllele}
@@ -84,16 +83,18 @@ object GermlineAssemblyCaller {
       val newReads = currentWindow.currentRegions()
       val filteredReads = newReads.filter(_.alignmentQuality > minAlignmentQuality)
 
+      // println(s"Building graph at $locus with ${newReads.length} reads")
       // TODO: Should update graph instead of rebuilding it
       // Need to keep track of reads removed from last update and reads added
       val currentGraph: DeBruijnGraph = DeBruijnGraph(
         filteredReads.map(_.sequence),
         kmerSize,
-        minOccurrence
+        minOccurrence,
+        mergeNodes = true
       )
 
-      val referenceStart = (currentWindow.currentLocus - currentWindow.halfWindowSize).toInt
-      val referenceEnd = (currentWindow.currentLocus + currentWindow.halfWindowSize).toInt
+      val referenceStart = (newReads.head.start).toInt
+      val referenceEnd = (newReads.last.end).toInt
 
       val currentReference: Array[Byte] = reference.getReferenceSequence(
         currentWindow.referenceName,
@@ -105,11 +106,14 @@ object GermlineAssemblyCaller {
 
         //val variantType = tuple._1
         val offset = tuple._2
-        val allele = Allele(Seq(currentReference((locus + offset).toInt)), Bases.stringToBases("<ALT>"))
+        val allele = Allele(
+          Bases.stringToBases("<REF>"),
+          Bases.stringToBases("<ALT>")
+        )
         val depth = filteredReads.length
         CalledAllele(
-          currentWindow.newRegions.head.sampleName,
-          currentWindow.newRegions.head.referenceContig,
+          filteredReads.head.sampleName,
+          filteredReads.head.referenceContig,
           locus,
           allele,
           AlleleEvidence(
@@ -139,16 +143,23 @@ object GermlineAssemblyCaller {
       )
 
       // Take `ploidy` paths
-      val topPaths = paths.take(expectedPloidy).map(DeBruijnGraph.mergeKmers)
+      val topPaths = paths
+        .take(expectedPloidy)
+        .map(DeBruijnGraph.mergeKmers)
+
+      println(s"Found ${topPaths.length} paths at $locus")
+
       // Align paths to reference
-      val alignments = topPaths.map(AffineGapPenaltyAlignment.align(_, currentReference))
+      val alignments =
+        topPaths
+        .map(AffineGapPenaltyAlignment.align(_, currentReference))
+
       // Output variants
       val variantAlignments =
         alignments
           .flatMap(
             getVariantAlignments(_)
-              .map(tup => buildVariant(locus, tup)
-              )
+              .map(tup => buildVariant(locus, tup))
           )
       (graph, variantAlignments.iterator)
     }
@@ -169,16 +180,19 @@ object GermlineAssemblyCaller {
       val kmerSize = args.kmerSize
       val minAlignmentQuality = args.minAlignmentQuality
       val minAverageBaseQuality = args.minAverageBaseQuality
-
       val reference = ReferenceBroadcast(args.referenceFastaPath, sc)
 
+      val qualityReads = readSet.mappedReads.filter(_.alignmentQuality > minAlignmentQuality)
+
       val lociOfInterest = DistributedUtil.pileupFlatMap[VariantLocus](
-        readSet.mappedReads,
+        qualityReads,
         lociPartitions,
         skipEmpty = true,
-        function = pileup => VariantLocus(pileup).iterator,
-        reference = None
+        function = pileup => VariantLocus(pileup).iterator
+        //reference = Some(reference)
       )
+
+      println(s"${lociOfInterest.count} loci with non-reference reads")
 
       val lociOfInterestSet = LociSet.union(
         lociOfInterest.map(
@@ -191,11 +205,10 @@ object GermlineAssemblyCaller {
         lociOfInterestSet
       )
 
-
       val genotypes: RDD[CalledAllele] =
         DistributedUtil.windowFlatMapWithState[MappedRead, CalledAllele, Option[DeBruijnGraph]](
           Seq(readSet.mappedReads),
-          lociPartitions,
+          lociOfInterestPartitions,
           skipEmpty = true,
           halfWindowSize = args.snvWindowRange,
           initialState = None,
@@ -211,10 +224,10 @@ object GermlineAssemblyCaller {
         )
 
       readSet.mappedReads.unpersist()
-
+      println(s"${genotypes.count} variants found")
       val filteredGenotypes =
-        GenotypeFilter(genotypes, args)
-          .flatMap(AlleleConversions.calledAlleleToADAMGenotype)
+        //GenotypeFilter(genotypes, args)
+          genotypes.flatMap(AlleleConversions.calledAlleleToADAMGenotype)
       Common.writeVariantsFromArguments(args, filteredGenotypes)
       DelayedMessages.default.print()
     }
