@@ -103,12 +103,14 @@ object SomaticJoint {
         throw new IllegalArgumentException("Reference fasta required")
       }
 
+      val loci = Common.lociFromArguments(args)
+
       val readSets = inputs.zipWithIndex.map({
         case (input, index) => ReadSet(
           sc,
           input.path,
           false,
-          Read.InputFilters.empty,
+          Read.InputFilters(overlapsLoci = Some(loci)),
           token = index,
           contigLengthsFromDictionary = !args.noSequenceDictionary,
           referenceGenome = reference)
@@ -118,7 +120,6 @@ object SomaticJoint {
         "Samples have different sequence dictionaries: %s."
           .format(readSets.map(_.sequenceDictionary.toString).mkString("\n")))
 
-      val loci = Common.lociFromArguments(args).result(readSets(0).contigLengths)
       val forceCallLoci = if (args.forceCallLoci.nonEmpty || args.forceCallLociFromFile.nonEmpty) {
         Common.loci(args.forceCallLoci, args.forceCallLociFromFile, readSets(0))
       } else {
@@ -133,7 +134,10 @@ object SomaticJoint {
       }
 
       val broadcastForceCallLoci = sc.broadcast(forceCallLoci)
-      val lociPartitions = DistributedUtil.partitionLociAccordingToArgs(args, loci, readSets.map(_.mappedReads): _*)
+      val lociPartitions = DistributedUtil.partitionLociAccordingToArgs(
+        args,
+        loci.result(readSets(0).contigLengths),
+        readSets.map(_.mappedReads): _*)
       val groupedInputs = Inputs.GroupedInputs(inputs)
 
       // TODO: we currently are re-shuffling on every pileupFlatMap call.

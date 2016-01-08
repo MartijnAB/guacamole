@@ -54,8 +54,10 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
     //file.getAbsolutePath
   }
 
-  val na12878SubsetBam = TestUtil.testDataPath(
-    "illumina-platinum-na12878-extract/NA12878.10k_variants.plus_chr1_3M-3.1M.chr_fixed.bam")
+  val na12878SubsetBam = "/tmp/NA12878.10k_variants.plus_chr1_3M-3.1M.chr_fixed.bam"
+    // TestUtil.testDataPath(
+    // "illumina-platinum-na12878-extract/NA12878.10k_variants.plus_chr1_3M-3.1M.chr_fixed.bam")
+
 
   val na12878ExpectedCallsVCF = TestUtil.testDataPath(
     "illumina-platinum-na12878-extract/NA12878.subset.vcf")
@@ -78,15 +80,15 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
   }
 
   case class VariantFromVarlensCSV(
-      genome: String,
-      contig: String,
-      interbaseStart: Int,
-      interbaseEnd: Int,
-      ref: String,
-      alt: String,
-      tumor: String,
-      normal: String,
-      validation: String) {}
+    genome: String,
+    contig: String,
+    interbaseStart: Int,
+    interbaseEnd: Int,
+    ref: String,
+    alt: String,
+    tumor: String,
+    normal: String,
+    validation: String) {}
 
   def csvRecords(filename: String): Seq[VariantFromVarlensCSV] = {
     Source.fromFile(filename).getLines.map(_.split(",").map(_.trim).toSeq).toList match {
@@ -289,6 +291,7 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
 
   }
 
+  /*
   sparkTest("somatic calling on subset of 3-sample cancer patient 1") {
     val germlineResultFile = tempFile(".vcf")
     val somaticResultFile = tempFile(".vcf")
@@ -299,7 +302,7 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
       args.outSmallGermlineVariants = germlineResultFile
       args.outSmallSomaticVariants = somaticResultFile
       args.referenceFastaPath = "/Users/tim/sinai/data/ucsc.hg19.fasta.gz"
-      args.loci = ((1).until(22).map(i => "chr%d".format(i)) ++ Seq("chrX", "chrY")).mkString(",")
+      //args.loci = ((1).until(22).map(i => "chr%d".format(i)) ++ Seq("chrX", "chrY")).mkString(",")
       args.loci = "chr4:71115210-71115219"
 
       args.inputs = cancerWGS1Bams.toArray
@@ -310,11 +313,11 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
     println("************* CANCER WGS1 SOMATIC CALLS *************")
 
     compareToCSV(somaticResultFile, cancerWGS1ExpectedSomaticCallsCSV)
-
   }
+  */
 
   sparkTest("germline calling on subset of illumina platinum NA12878") {
-    if (false) {
+    if (true) {
       val resultFile = tempFile(".vcf")
       println(resultFile)
 

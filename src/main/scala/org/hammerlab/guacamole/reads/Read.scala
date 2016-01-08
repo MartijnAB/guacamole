@@ -405,7 +405,11 @@ object Read extends Logging {
         val optimizedQueryIntervals = QueryInterval.optimizeIntervals(queryIntervals.toArray)
         reader.query(optimizedQueryIntervals, false) // Note: this can return unmapped reads, which we filter below.
       } else {
-        Common.progress("Using samtools without BAM index to read: %s".format(filename))
+        val skippedReason = if (reader.hasIndex)
+          "(index is available but not needed)"
+        else
+          "(index unavailable)"
+        Common.progress("Using samtools without BAM index %s to read: %s".format(skippedReason, filename))
         reader.iterator
       }
       val reads = JavaConversions.asScalaIterator(recordIterator).flatMap(record => {
