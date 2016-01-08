@@ -29,6 +29,7 @@ import org.apache.spark.SparkContext
 import org.bdgenomics.adam.util.PhredUtils
 import org.hammerlab.guacamole.Common.Arguments.NoSequenceDictionary
 import org.hammerlab.guacamole._
+import org.hammerlab.guacamole.commands.jointcaller.GenomicCharacterization.{SomaticCharacterization, GermlineCharacterization}
 import org.hammerlab.guacamole.pileup._
 import org.hammerlab.guacamole.reads._
 import org.hammerlab.guacamole.reference.ReferenceBroadcast
@@ -140,43 +141,58 @@ object SomaticJoint {
         readSets.map(_.mappedReads): _*)
       val groupedInputs = Inputs.GroupedInputs(inputs)
 
-      // TODO: we currently are re-shuffling on every pileupFlatMap call.
-      // Call germline small variants.
-      val germlineCalls = DistributedUtil.pileupFlatMapMultipleRDDs(
-        groupedInputs.normalDNA.map(readSets(_).mappedReads),
-        lociPartitions,
-        false, // skip empty
-        pileups => {
-          val characterization = GenomicCharacterization.GermlineCharacterization(groupedInputs.normalDNA.map(pileups(_)))
-          val emit = (characterization.isVariant
-            || broadcastForceCallLoci.value.onContig(pileups(0).referenceName).contains(pileups(0).locus))
-          if (emit) Iterator(characterization) else Iterator.empty
-        }, referenceGenome = reference).collect
-
-      Common.progress("Called %,d germline variants.".format(germlineCalls.length))
-
-      if (args.outSmallGermlineVariants.nonEmpty) {
-        Common.progress("Writing germline variants.")
-        GenomicCharacterization.GermlineCharacterization.writeVcf(
-          args.outSmallGermlineVariants, args.normalSampleName, readSets, germlineCalls, reference.get)
-        Common.progress("Wrote %,d calls to %s".format(germlineCalls.length, args.outSmallGermlineVariants))
-      }
-
-      /*
       val emitGermlineCalls = args.outSmallGermlineVariants.nonEmpty
+      val emitSomaticCalls = args.outSmallSomaticVariants.nonEmpty
+
       val calls = DistributedUtil.pileupFlatMapMultipleRDDs(
         readSets.map(_.mappedReads),
         lociPartitions,
         false, // skip empty
         pileups => {
           val germlineCharacterization = GenomicCharacterization.GermlineCharacterization(groupedInputs.normalDNA.map(pileups(_)))
-          val emitGermlineCall = (
-            emitGermlineCalls && (
+
+          val somaticCharacterization = GenomicCharacterization.SomaticCharacterization(
+            germlineCharacterization,
+            groupedInputs.tumorDNA.map(pileups(_)),
+            groupedInputs.tumorRNA.map(pileups(_)))
+
+          val emitGermlineCall = emitGermlineCalls && (
               germlineCharacterization.isVariant ||
-              broadcastForceCallLoci.value.onContig(pileups(0).referenceName).contains(pileups(0).locus)))
-          if (emitGermlineCall) Iterator(germlineCharacterization) else Iterator.empty
+              broadcastForceCallLoci.value.onContig(pileups(0).referenceName).contains(pileups(0).locus))
+
+          val emitSomaticCall = emitSomaticCalls && (
+            somaticCharacterization.isVariant ||
+              broadcastForceCallLoci.value.onContig(pileups(0).referenceName).contains(pileups(0).locus))
+
+          val emit = Seq.newBuilder[GenomicCharacterization]
+          if (emitGermlineCall) {
+            emit += germlineCharacterization
+          }
+          if (emitSomaticCall) {
+            emit += somaticCharacterization
+          }
+          emit.result.toIterator
         }, referenceGenome = reference).collect
-        */
+
+
+      val germlineCalls = calls.filter(_.isInstanceOf[GermlineCharacterization]).map(_.asInstanceOf[GermlineCharacterization])
+      val somaticCalls = calls.filter(_.isInstanceOf[SomaticCharacterization]).map(_.asInstanceOf[SomaticCharacterization])
+
+      Common.progress("Called %,d germline and %,d somatic variants.".format(germlineCalls.length, somaticCalls.length))
+
+      if (args.outSmallGermlineVariants.nonEmpty) {
+          Common.progress("Writing germline variants.")
+          GenomicCharacterization.GermlineCharacterization.writeVcf(
+            args.outSmallGermlineVariants, Seq(args.normalSampleName), readSets, germlineCalls, reference.get)
+          Common.progress("Wrote %,d calls to %s".format(germlineCalls.length, args.outSmallGermlineVariants))
+      }
+
+      if (args.outSmallSomaticVariants.nonEmpty) {
+        Common.progress("Writing somatic variants.")
+        GenomicCharacterization.SomaticCharacterization.writeVcf(
+          args.outSmallSomaticVariants, groupedInputs.tumorDNA.map(inputs(_).name), readSets, somaticCalls, reference.get)
+        Common.progress("Wrote %,d calls to %s".format(somaticCalls.length, args.outSmallSomaticVariants))
+      }
 
     }
 

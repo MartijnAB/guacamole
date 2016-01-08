@@ -16,13 +16,13 @@ import org.hammerlab.guacamole.pileup.{ PileupElement, Pileup }
 import org.hammerlab.guacamole.pileup.{ PileupElement, Pileup }
 import org.hammerlab.guacamole.reads.Read
 import org.hammerlab.guacamole.reference.ReferenceBroadcast
+import sun.reflect.generics.reflectiveObjects.NotImplementedException
 
 import scala.collection.mutable.ArrayBuffer
 import scala.collection.{ mutable, JavaConversions }
 
 trait GenomicCharacterization {
-  def toHtsjdVariantContext(sampleName: String): VariantContext
-
+  def toHtsjdVariantContext(sampleNames: Seq[String]): VariantContext
 }
 
 object GenomicCharacterization {
@@ -45,16 +45,48 @@ object GenomicCharacterization {
     loglikelihoods.sum
   }
 
-  /*
   case class SomaticCharacterization(contig: String,
                                      position: Long,
                                      ref: String,
                                      topAlt: String,
-                                     highestLikelihoodMixturesPerSample: PerSample[Map[(String, String), Double]],
-                                     allelicDepthsPerSample: PerSample[Map[String, (Int, Int)]]  // allele -> (total, positive strand)
-                                      )
+                                     isVariant: Boolean,
+                                     allelicDepthsPerSample: PerSample[Map[String, (Int, Int)]])  // allele -> (total, positive strand)
+                                      extends GenomicCharacterization {
 
-  {}
+    def toHtsjdVariantContext(sampleNames: Seq[String]): VariantContext = {
+      def makeHtsjdkAllele(allele: String): Allele = Allele.create(allele, allele == ref)
+
+      val alleles = Seq(ref, topAlt).distinct
+
+      val genotypes = sampleNames.zip(allelicDepthsPerSample).map({case (name, allelicDepths) => {
+        new GenotypeBuilder(name)
+          .alleles(JavaConversions.seqAsJavaList(Seq(ref, topAlt).map(makeHtsjdkAllele _)))
+          .AD(alleles.map(allelicDepths.getOrElse(_, (0, 0))).map(_._1).toArray)
+            // .PL(genotypeLikelihoods.toArray)
+            // .DP(depth)
+            // .GQ(genotypeQuality.toInt)
+            // .attribute("RL", logUnnormalizedPosteriors.map(
+            //   pair => "%s/%s=%1.2f".format(pair._1._1, pair._1._2, pair._2)).mkString(" "))
+            // .attribute("SBP",
+            //   alleles.map(allele => "%s=%1.2f".format(allele, strandBias.getOrElse(allele, 0.0))).mkString(" "))
+          .attribute("ADP",
+            alleles.map(allele => {
+              val totalAndPositive = allelicDepths.getOrElse(allele, (0, 0))
+              "%s=%d/%d".format(allele, totalAndPositive._2, totalAndPositive._1)
+            }).mkString(" "))
+            .make
+      }})
+
+      new VariantContextBuilder()
+        .chr(contig)
+        .start(position + 1) // one based based inclusive
+        .stop(position + 1 + math.max(ref.length - 1, 0))
+        .genotypes(JavaConversions.seqAsJavaList(genotypes))
+        .alleles(JavaConversions.seqAsJavaList(alleles.map(makeHtsjdkAllele _)))
+        .make
+    }
+
+  }
   object SomaticCharacterization {
 
     case class Parameters(negativeLog10SomaticVariant: Double = 2,
@@ -65,66 +97,80 @@ object GenomicCharacterization {
     def apply(germlineCharacterization: GermlineCharacterization,
               tumorDNAPileups: Seq[Pileup],
               tumorRNAPileups: Seq[Pileup],
-              parameters: Parameters = default): GermlineCharacterization = {
+              parameters: Parameters = default): SomaticCharacterization = {
+
+      // We call a variant if we reject the null hypothesis in a likelhood ratio test for EITHER an individual
+      // sample OR the pooled data.
 
       val individualDNASampleElements = tumorDNAPileups.map(_.elements.filter((_.read.alignmentQuality > 0)))
       val allDNAElements = individualDNASampleElements.flatten
 
       val ref = germlineCharacterization.ref
 
-      val allelicDepthsAndSubsampled = allDNAElements.sortBy(_.qualityScore * -1).groupBy(element => {
-        Bases.basesToString(element.sequencedBases).toUpperCase
-      }).mapValues(items => {
-        val positive = items.filter(_.read.isPositiveStrand)
-        val negative = items.filter(!_.read.isPositiveStrand)
-        val numToTake = Math.max(Math.min(positive.size, negative.size), 3)
-        val adjustedItems = positive.take(numToTake) ++ negative.take(numToTake)
-        (items.size, positive.size, adjustedItems)
-      })
-      val allelicDepths = allelicDepthsAndSubsampled.mapValues(item => (item._1, item._2))
-      val downsampledElements = allelicDepthsAndSubsampled.mapValues(_._3).values.flatten
+      var topAltPooled: Option[String] = None
 
-      val nonRefAlleles = allelicDepths.filterKeys(_ != ref).toSeq.sortBy(_._2._1 * -1).map(_._1)
+      val (pooledDepths, pooledCall) :: sampleDepthsAndCalls = (Seq(allDNAElements) ++ individualDNASampleElements).map(elements => {
 
-      val topAlt = nonRefAlleles.headOption.getOrElse("N")
+        val allelicDepthsAndSubsampled = elements.sortBy(_.qualityScore * -1).groupBy(element => {
+          Bases.basesToString(element.sequencedBases).toUpperCase
+        }).mapValues(items => {
+          val positive = items.filter(_.read.isPositiveStrand)
+          val negative = items.filter(!_.read.isPositiveStrand)
+          val numToTake = Math.max(Math.min(positive.size, negative.size), 3)
+          val adjustedItems = positive.take(numToTake) ++ negative.take(numToTake)
+          (items.size, positive.size, adjustedItems)
+        })
+        val allelicDepths = allelicDepthsAndSubsampled.mapValues(item => (item._1, item._2))
+        val downsampledElements = allelicDepthsAndSubsampled.mapValues(_._3).values.flatten
 
-      val topAltVaf = allelicDepthsAndSubsampled.get(
-        topAlt).map(_._3.size / downsampledElements.size.toDouble).getOrElse(0.0)
-      val singleAltMixture = Map(ref -> (1.0 - topAltVaf), topAlt -> topAltVaf)
+        val nonRefAlleles = allelicDepths.filterKeys(_ != ref).toSeq.sortBy(_._2._1 * -1).map(_._1)
 
-      val logUnnormalizedPosteriors = if (germlineCharacterization.isVariant) {
-       // TODO
-        Map()
-      } else {
-        Map(
-          Map(ref -> 1.0) -> (
-            logLikelihoodPileup(downsampledElements, germlineCharacterization.genotypeVafs)),
+        // First iteratorion of loop we're processing the pooled data, so we store topAlt here.
+        val topAlt = topAltPooled.getOrElse(nonRefAlleles.headOption.getOrElse("N"))
+        topAltPooled = Some(topAlt)
 
-          // Somatic
-          singleAltMixture -> (
-            logLikelihoodPileup(downsampledElements, singleAltMixture)
+        val topAltVaf = allelicDepthsAndSubsampled.get(
+          topAlt).map(_._3.size / downsampledElements.size.toDouble).getOrElse(0.0)
+
+        val singleAltMixture = Map(ref -> (1.0 - topAltVaf), topAlt -> topAltVaf)
+
+        val logUnnormalizedPosteriors = if (germlineCharacterization.isVariant) {
+          Map(
+            Map(ref -> 1.0) -> 0.0
+          )
+        } else {
+          Map(
+            Map(ref -> 1.0) -> logLikelihoodPileup(downsampledElements, germlineCharacterization.genotypeVafs),
+
+            // Somatic
+            singleAltMixture -> (logLikelihoodPileup(downsampledElements, singleAltMixture)
               - parameters.negativeLog10SomaticVariant))
-      }
+        }
+        (allelicDepths, logUnnormalizedPosteriors.toSeq.maxBy(_._2)._1)
+      })
 
+      val noCallGenotype = Map(ref -> 1.0)
 
-      val genotype = logUnnormalizedPosteriors.toSeq.maxBy(_._2)._1
-      //if (genotype != (ref, ref)) {
-      //  println("Adjusted %d -> %d".format(elements.size, downsampledElements.size))
-      //}
-      GermlineCharacterization(
-        normalDNAPileups(0).referenceName,
-        normalDNAPileups(0).locus,
+      SomaticCharacterization(
+        tumorDNAPileups(0).referenceName,
+        tumorDNAPileups(0).locus,
         ref,
-        topAlt,
-        secondAlt,
-        genotype,
-        allelicDepths,
-        depth,
-        logUnnormalizedPosteriors)
+        topAltPooled.get,
+        pooledCall != noCallGenotype || sampleDepthsAndCalls.exists(_._2 != noCallGenotype),
+        sampleDepthsAndCalls.map(_._1))
     }
 
+    def writeVcf(
+                  path: String,
+                  sampleNames: Seq[String],
+                  readSets: Seq[ReadSet],
+                  calls: Iterable[SomaticCharacterization],
+                  reference: ReferenceBroadcast) = {
+      // TODO
+
+      throw new NotImplementedException()
+    }
   }
-  */
 
   case class GermlineCharacterization(
     contig: String,
@@ -155,8 +201,11 @@ object GenomicCharacterization {
 
     def genotypeQuality = genotypeLikelihoods.sorted.seq(1)
 
-    def toHtsjdVariantContext(sampleName: String): VariantContext = {
+    def toHtsjdVariantContext(sampleNames: Seq[String]): VariantContext = {
       def makeHtsjdkAllele(allele: String): Allele = Allele.create(allele, allele == ref)
+
+      assume(sampleNames.size == 1)
+      val sampleName = sampleNames(0)
 
       val alleles = Seq(ref, genotype._1, genotype._2).distinct
 
@@ -352,7 +401,7 @@ object GenomicCharacterization {
 
     def writeVcf(
       path: String,
-      sampleName: String,
+      sampleNames: Seq[String],
       readSets: Seq[ReadSet],
       calls: Iterable[GermlineCharacterization],
       reference: ReferenceBroadcast) = {
@@ -374,7 +423,7 @@ object GenomicCharacterization {
       headerLines.add(new VCFFormatHeaderLine("SBP", 1, VCFHeaderLineType.String, "log10 strand bias p-values"))
       headerLines.add(new VCFFormatHeaderLine("ADP", 1, VCFHeaderLineType.String, "allelic depth as num postiive strand / num total"))
 
-      val header = new VCFHeader(headerLines, JavaConversions.seqAsJavaList(Seq(sampleName)))
+      val header = new VCFHeader(headerLines, JavaConversions.seqAsJavaList(sampleNames))
       header.setSequenceDictionary(readSets(0).sequenceDictionary.get.toSAMSequenceDictionary)
       header.setWriteCommandLine(true)
       header.setWriteEngineHeaders(true)
@@ -386,7 +435,7 @@ object GenomicCharacterization {
       var prevChr = ""
       var prevStart = -1
       normalizedCalls.foreach(call => {
-        val variantContext = call.toHtsjdVariantContext(sampleName)
+        val variantContext = call.toHtsjdVariantContext(sampleNames)
         if (prevChr == variantContext.getContig) {
           assert(variantContext.getStart >= prevStart,
             "Out of order: expected %d >= %d".format(variantContext.getStart, prevStart))
