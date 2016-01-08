@@ -162,6 +162,7 @@ object SomaticJoint {
         Common.progress("Wrote %,d calls to %s".format(germlineCalls.length, args.outSmallGermlineVariants))
       }
 
+      /*
       val emitGermlineCalls = args.outSmallGermlineVariants.nonEmpty
       val calls = DistributedUtil.pileupFlatMapMultipleRDDs(
         readSets.map(_.mappedReads),
@@ -175,6 +176,7 @@ object SomaticJoint {
               broadcastForceCallLoci.value.onContig(pileups(0).referenceName).contains(pileups(0).locus)))
           if (emitGermlineCall) Iterator(germlineCharacterization) else Iterator.empty
         }, referenceGenome = reference).collect
+        */
 
     }
 

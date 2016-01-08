@@ -291,30 +291,32 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
   }
 
   sparkTest("somatic calling on subset of 3-sample cancer patient 1") {
-    val germlineResultFile = tempFile(".vcf")
-    val somaticResultFile = tempFile(".vcf")
-    println(germlineResultFile, somaticResultFile)
+    if (false) {
+      val germlineResultFile = tempFile(".vcf")
+      val somaticResultFile = tempFile(".vcf")
+      println(germlineResultFile, somaticResultFile)
 
-    if (true) {
-      val args = new SomaticJoint.Arguments()
-      args.outSmallGermlineVariants = germlineResultFile
-      args.outSmallSomaticVariants = somaticResultFile
-      args.referenceFastaPath = "/Users/tim/sinai/data/ucsc.hg19.fasta.gz"
-      //args.loci = ((1).until(22).map(i => "chr%d".format(i)) ++ Seq("chrX", "chrY")).mkString(",")
-      args.loci = "chr4:71115210-71115219"
+      if (true) {
+        val args = new SomaticJoint.Arguments()
+        args.outSmallGermlineVariants = germlineResultFile
+        args.outSmallSomaticVariants = somaticResultFile
+        args.referenceFastaPath = "/Users/tim/sinai/data/ucsc.hg19.fasta.gz"
+        //args.loci = ((1).until(22).map(i => "chr%d".format(i)) ++ Seq("chrX", "chrY")).mkString(",")
+        args.loci = "chr4:71115210-71115219"
 
-      args.inputs = cancerWGS1Bams.toArray
-      //args.forceCallLociFromFile = na12878ExpectedCallsVCF
-      SomaticJoint.Caller.run(args, sc)
+        args.inputs = cancerWGS1Bams.toArray
+        //args.forceCallLociFromFile = na12878ExpectedCallsVCF
+        SomaticJoint.Caller.run(args, sc)
+      }
+
+      println("************* CANCER WGS1 SOMATIC CALLS *************")
+
+      compareToCSV(somaticResultFile, cancerWGS1ExpectedSomaticCallsCSV)
     }
-
-    println("************* CANCER WGS1 SOMATIC CALLS *************")
-
-    compareToCSV(somaticResultFile, cancerWGS1ExpectedSomaticCallsCSV)
   }
 
   sparkTest("germline calling on subset of illumina platinum NA12878") {
-    if (false) {
+    if (true) {
       val resultFile = tempFile(".vcf")
       println(resultFile)
 

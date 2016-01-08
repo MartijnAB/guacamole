@@ -45,6 +45,7 @@ object GenomicCharacterization {
     loglikelihoods.sum
   }
 
+  /*
   case class SomaticCharacterization(contig: String,
                                      position: Long,
                                      ref: String,
