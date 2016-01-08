@@ -20,7 +20,8 @@ package org.hammerlab.guacamole.commands
 
 import java.io.File
 
-import htsjdk.variant.variantcontext.VariantContext
+import au.com.bytecode.opencsv.CSVParser
+import htsjdk.variant.variantcontext.{Allele, VariantContextBuilder, VariantContext}
 import htsjdk.variant.vcf.VCFFileReader
 import org.hammerlab.guacamole.commands.jointcaller.SomaticJoint
 import SomaticJoint.Arguments
@@ -34,6 +35,7 @@ import org.scalatest.prop.TableDrivenPropertyChecks
 
 import scala.collection.JavaConversions
 import scala.collection.mutable.ArrayBuffer
+import scala.io.Source
 
 class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
 
@@ -43,20 +45,27 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
     Pileup(localReads, referenceName, locus)
   }
 
+  var tempFileNum = 0
   def tempFile(suffix: String): String = {
-    "/tmp/test-somatic-joint-caller.vcf"
+    tempFileNum += 1
+    "/tmp/test-somatic-joint-caller-%d.vcf".format(tempFileNum)
     //val file = File.createTempFile("test-somatic-joint-caller", suffix)
     //file.deleteOnExit()
     //file.getAbsolutePath
   }
 
-  val na12878_subset_bam = TestUtil.testDataPath(
+  val na12878SubsetBam = TestUtil.testDataPath(
     "illumina-platinum-na12878-extract/NA12878.10k_variants.plus_chr1_3M-3.1M.chr_fixed.bam")
 
-  val na12878_expected_calls_vcf = TestUtil.testDataPath(
+  val na12878ExpectedCallsVCF = TestUtil.testDataPath(
     "illumina-platinum-na12878-extract/NA12878.subset.vcf")
 
-  val chr1_prefix_fasta = TestUtil.testDataPath("illumina-platinum-na12878-extract/chr1.prefix.fa")
+  val chr1PrefixFasta = TestUtil.testDataPath("illumina-platinum-na12878-extract/chr1.prefix.fa")
+
+  val cancerWGS1Bams = Seq("normal.bam", "primary.bam", "recurrence.bam").map(
+    name => TestUtil.testDataPath("cancer-wgs1/" + name))
+
+  val cancerWGS1ExpectedSomaticCallsCSV = TestUtil.testDataPath("cancer-wgs1/variants.csv")
 
   def vcfRecords(reader: VCFFileReader): Seq[VariantContext] = {
     val results = new ArrayBuffer[VariantContext]
@@ -66,6 +75,38 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
       results += value
     }
     results
+  }
+
+  case class VariantFromVarlensCSV(
+                                    genome: String,
+                                    contig: String,
+                                    interbaseStart: Int,
+                                    interbaseEnd: Int,
+                                    ref: String,
+                                    alt: String,
+                                    tumor: String,
+                                    normal: String,
+                                    validation: String)
+  {}
+
+  def csvRecords(filename: String): Seq[VariantFromVarlensCSV] = {
+    Source.fromFile(filename).getLines.map(_.split(",").map(_.trim).toSeq).toList match {
+      case header :: records => {
+        records.map(record => {
+          val fields = header.zip(record).toMap
+          VariantFromVarlensCSV(
+            fields("genome"),
+            fields("contig"),
+            fields("interbase_start").toInt,
+            fields("interbase_end").toInt,
+            fields("ref"),
+            fields("alt"),
+            fields("tumor"),
+            fields("normal"),
+            fields("validation"))
+        })
+      }
+    }
   }
 
   case class VCFComparison(expected: Seq[VariantContext], experimental: Seq[VariantContext]) {
@@ -186,9 +227,18 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
     })
   }
 
-  def printStats(experimentalFile: String): Unit = {
+  def compareToCSV(experimentalFile: String, expectedFile: String): Unit = {
+    val recordsExpected = csvRecords(expectedFile)
+    val readerExperimental = new VCFFileReader(new File(experimentalFile), false)
+    val recordsExperimental = vcfRecords(readerExperimental)
 
-    val readerExpected = new VCFFileReader(new File(na12878_expected_calls_vcf), false)
+    println("Experimental calls: %,d. Gold calls: %,d.".format(recordsExperimental.length, recordsExpected.length))
+
+  }
+
+  def compareToVCF(experimentalFile: String, expectedFile: String): Unit = {
+
+    val readerExpected = new VCFFileReader(new File(expectedFile), false)
     val recordsExpected = vcfRecords(readerExpected)
     val reader = new VCFFileReader(new File(experimentalFile), false)
     val recordsGuacamole = vcfRecords(reader)
@@ -239,30 +289,58 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
 
   }
 
-  sparkTest("germline calling on subset of illumina platinum NA12878") {
-    val resultFile = tempFile(".vcf")
-    println(resultFile)
+  sparkTest("somatic calling on subset of 3-sample cancer patient 1") {
+    val germlineResultFile = tempFile(".vcf")
+    val somaticResultFile = tempFile(".vcf")
+    println(germlineResultFile, somaticResultFile)
 
     if (true) {
       val args = new SomaticJoint.Arguments()
-      args.outSmallGermlineVariants = resultFile
-      args.inputs = Seq(na12878_subset_bam).toArray
-      args.loci = "chr1:0-6700000"
-      args.forceCallLociFromFile = na12878_expected_calls_vcf
-      args.referenceFastaPath = chr1_prefix_fasta
+      args.outSmallGermlineVariants = germlineResultFile
+      args.outSmallSomaticVariants = somaticResultFile
+      args.referenceFastaPath = "/Users/tim/sinai/data/ucsc.hg19.fasta.gz"
+      args.loci = ((1).until(22).map(i => "chr%d".format(i)) ++ Seq("chrX", "chrY")).mkString(",")
+      args.loci = "chr4:71115210-71115219"
+
+      args.inputs = cancerWGS1Bams.toArray
+      //args.forceCallLociFromFile = na12878ExpectedCallsVCF
       SomaticJoint.Caller.run(args, sc)
     }
 
-    println("************* GUACAMOLE *************")
-    printStats(resultFile)
+    println("************* CANCER WGS1 SOMATIC CALLS *************")
 
-    println("************* UNIFIED GENOTYPER *************")
-    printStats(TestUtil.testDataPath(
-      "illumina-platinum-na12878-extract/unified_genotyper.vcf"))
+    compareToCSV(somaticResultFile, cancerWGS1ExpectedSomaticCallsCSV)
 
-    println("************* HaplotypeCaller *************")
-    printStats(TestUtil.testDataPath(
-      "illumina-platinum-na12878-extract/haplotype_caller.vcf"))
 
+  }
+
+  sparkTest("germline calling on subset of illumina platinum NA12878") {
+    if (false) {
+      val resultFile = tempFile(".vcf")
+      println(resultFile)
+
+      if (true) {
+        val args = new SomaticJoint.Arguments()
+        args.outSmallGermlineVariants = resultFile
+        args.inputs = Seq(na12878SubsetBam).toArray
+        args.loci = "chr1:0-6700000"
+        args.forceCallLociFromFile = na12878ExpectedCallsVCF
+        args.referenceFastaPath = chr1PrefixFasta
+        SomaticJoint.Caller.run(args, sc)
+      }
+
+      println("************* GUACAMOLE *************")
+      compareToVCF(resultFile, na12878ExpectedCallsVCF)
+
+      println("************* UNIFIED GENOTYPER *************")
+      compareToVCF(TestUtil.testDataPath(
+        "illumina-platinum-na12878-extract/unified_genotyper.vcf"),
+        na12878ExpectedCallsVCF)
+
+      println("************* HaplotypeCaller *************")
+      compareToVCF(TestUtil.testDataPath(
+        "illumina-platinum-na12878-extract/haplotype_caller.vcf"),
+        na12878ExpectedCallsVCF)
+    }
   }
 }
