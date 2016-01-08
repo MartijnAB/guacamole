@@ -26,7 +26,6 @@ trait GenomicCharacterization {
 }
 
 object GenomicCharacterization {
-
   def logLikelihoodPileup(elements: Iterable[PileupElement], mixture: Map[String, Double]): Double = {
     def logLikelihoodPileupElement(element: PileupElement): Double = {
       if (element.read.alignmentQuality == 0) {
@@ -46,7 +45,6 @@ object GenomicCharacterization {
     loglikelihoods.sum
   }
 
-  /*
   case class SomaticCharacterization(contig: String,
                                      position: Long,
                                      ref: String,
@@ -63,7 +61,10 @@ object GenomicCharacterization {
     {}
     val default = Parameters()
 
-    def apply(germlineCharacterization: GermlineCharacterization, tumorDNAPileups: Seq[Pileup], tumorRNAPileups: Seq[Pileup], parameters: Parameters = default): GermlineCharacterization = {
+    def apply(germlineCharacterization: GermlineCharacterization,
+              tumorDNAPileups: Seq[Pileup],
+              tumorRNAPileups: Seq[Pileup],
+              parameters: Parameters = default): GermlineCharacterization = {
 
       val individualDNASampleElements = tumorDNAPileups.map(_.elements.filter((_.read.alignmentQuality > 0)))
       val allDNAElements = individualDNASampleElements.flatten
@@ -395,85 +396,5 @@ object GenomicCharacterization {
       })
       writer.close()
     }
-  }
-
-  object Caller extends SparkCommand[Arguments] {
-    override val name = "somatic-joint"
-    override val description = "somatic caller for any number of samples from the same patient"
-
-    override def run(args: Arguments, sc: SparkContext): Unit = {
-      val inputs = Inputs.parseMultiple(args.inputs)
-
-      if (!args.quiet) {
-        println("Running on %d inputs:".format(inputs.length))
-        inputs.foreach(input => println(input))
-      }
-
-      val reference = Option(args.referenceFastaPath).map(ReferenceBroadcast(_, sc))
-      if (reference.isEmpty) {
-        throw new IllegalArgumentException("Reference fasta required")
-      }
-
-      val readSets = inputs.zipWithIndex.map({
-        case (input, index) => ReadSet(
-          sc,
-          input.path,
-          false,
-          Read.InputFilters.empty,
-          token = index,
-          contigLengthsFromDictionary = !args.noSequenceDictionary,
-          referenceGenome = reference)
-      })
-
-      assert(readSets.forall(_.sequenceDictionary == readSets(0).sequenceDictionary),
-        "Samples have different sequence dictionaries: %s."
-          .format(readSets.map(_.sequenceDictionary.toString).mkString("\n")))
-
-      val loci = Common.lociFromArguments(args)
-      val forceCallLoci = if (args.forceCallLoci.nonEmpty || args.forceCallLociFromFile.nonEmpty) {
-        Common.loci(args.forceCallLoci, args.forceCallLociFromFile, readSets(0))
-      } else {
-        LociSet.empty
-      }
-
-      if (forceCallLoci.nonEmpty) {
-        Common.progress("Force calling %,d loci across %,d contig(s): %s".format(
-          forceCallLoci.count,
-          forceCallLoci.contigs.length,
-          forceCallLoci.truncatedString()))
-      }
-
-      val broadcastForceCallLoci = sc.broadcast(forceCallLoci)
-      val lociPartitions = DistributedUtil.partitionLociAccordingToArgs(
-        args, loci.result(readSets(0).contigLengths), readSets.map(_.mappedReads): _*)
-      val groupedInputs = GroupedInputs(inputs)
-
-      // TODO: we currently are re-shuffling on every pileupFlatMap call.
-      // Call germline small variants.
-      val germlineCalls = DistributedUtil.pileupFlatMapMultipleRDDs(
-        groupedInputs.normalDNA.map(readSets(_).mappedReads),
-        lociPartitions,
-        false, // skip empty
-        pileups => {
-          val characterization = GermlineCharacterization(groupedInputs.normalDNA.map(pileups(_)))
-          val emit = (characterization.isVariant
-            || broadcastForceCallLoci.value.onContig(pileups(0).referenceName).contains(pileups(0).locus))
-          if (emit) Iterator(characterization) else Iterator.empty
-        }, referenceGenome = reference).collect
-
-      Common.progress("Called %,d germline variants.".format(germlineCalls.length))
-
-      if (args.outSmallGermlineVariants.nonEmpty) {
-        Common.progress("Writing germline variants.")
-        GermlineCharacterization.writeVcf(
-          args.outSmallGermlineVariants, args.normalSampleName, readSets, germlineCalls, reference.get)
-      }
-      Common.progress("Wrote %,d calls to %s".format(germlineCalls.length, args.outSmallGermlineVariants))
-    }
-  }
-
-  def combinedPileup(pileups: Seq[Pileup]) = {
-    val elements = pileups.flatMap(_.elements)
-    Pileup(pileups(0).referenceName, pileups(0).locus, pileups(0).referenceBase, elements)
   }
 }

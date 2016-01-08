@@ -54,9 +54,8 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
     //file.getAbsolutePath
   }
 
-  val na12878SubsetBam = "/tmp/NA12878.10k_variants.plus_chr1_3M-3.1M.chr_fixed.bam"
-    // TestUtil.testDataPath(
-    // "illumina-platinum-na12878-extract/NA12878.10k_variants.plus_chr1_3M-3.1M.chr_fixed.bam")
+  val na12878SubsetBam = TestUtil.testDataPath(
+    "illumina-platinum-na12878-extract/NA12878.10k_variants.plus_chr1_3M-3.1M.chr_fixed.bam")
 
 
   val na12878ExpectedCallsVCF = TestUtil.testDataPath(
@@ -291,7 +290,6 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
 
   }
 
-  /*
   sparkTest("somatic calling on subset of 3-sample cancer patient 1") {
     val germlineResultFile = tempFile(".vcf")
     val somaticResultFile = tempFile(".vcf")
@@ -314,10 +312,9 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
 
     compareToCSV(somaticResultFile, cancerWGS1ExpectedSomaticCallsCSV)
   }
-  */
 
   sparkTest("germline calling on subset of illumina platinum NA12878") {
-    if (true) {
+    if (false) {
       val resultFile = tempFile(".vcf")
       println(resultFile)
 
