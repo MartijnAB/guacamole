@@ -21,7 +21,7 @@ package org.hammerlab.guacamole.commands
 import java.io.File
 
 import au.com.bytecode.opencsv.CSVParser
-import htsjdk.variant.variantcontext.{Allele, VariantContextBuilder, VariantContext}
+import htsjdk.variant.variantcontext.{ Allele, VariantContextBuilder, VariantContext }
 import htsjdk.variant.vcf.VCFFileReader
 import org.hammerlab.guacamole.commands.jointcaller.SomaticJoint
 import SomaticJoint.Arguments
@@ -78,16 +78,15 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
   }
 
   case class VariantFromVarlensCSV(
-                                    genome: String,
-                                    contig: String,
-                                    interbaseStart: Int,
-                                    interbaseEnd: Int,
-                                    ref: String,
-                                    alt: String,
-                                    tumor: String,
-                                    normal: String,
-                                    validation: String)
-  {}
+      genome: String,
+      contig: String,
+      interbaseStart: Int,
+      interbaseEnd: Int,
+      ref: String,
+      alt: String,
+      tumor: String,
+      normal: String,
+      validation: String) {}
 
   def csvRecords(filename: String): Seq[VariantFromVarlensCSV] = {
     Source.fromFile(filename).getLines.map(_.split(",").map(_.trim).toSeq).toList match {
@@ -106,6 +105,7 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
             fields("validation"))
         })
       }
+      case Nil => throw new IllegalArgumentException("Empty file")
     }
   }
 
@@ -310,7 +310,6 @@ class SomaticJointCallerSuite extends GuacFunSuite with Matchers {
     println("************* CANCER WGS1 SOMATIC CALLS *************")
 
     compareToCSV(somaticResultFile, cancerWGS1ExpectedSomaticCallsCSV)
-
 
   }
 

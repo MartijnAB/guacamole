@@ -118,7 +118,7 @@ object SomaticJoint {
         "Samples have different sequence dictionaries: %s."
           .format(readSets.map(_.sequenceDictionary.toString).mkString("\n")))
 
-      val loci = Common.lociFromArguments(args, readSets(0))
+      val loci = Common.lociFromArguments(args).result(readSets(0).contigLengths)
       val forceCallLoci = if (args.forceCallLoci.nonEmpty || args.forceCallLociFromFile.nonEmpty) {
         Common.loci(args.forceCallLoci, args.forceCallLociFromFile, readSets(0))
       } else {

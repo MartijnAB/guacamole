@@ -9,12 +9,12 @@ import org.apache.spark.SparkContext
 import org.bdgenomics.adam.util.PhredUtils
 import org.hammerlab.guacamole.DistributedUtil.PerSample
 import org.hammerlab.guacamole.commands.jointcaller.GenomicCharacterization.GermlineCharacterization.Parameters
-import org.hammerlab.guacamole.commands.jointcaller.Inputs.Input
+import org.hammerlab.guacamole.commands.jointcaller.Inputs.{ GroupedInputs, Input }
 import org.hammerlab.guacamole.commands.jointcaller.SomaticJoint.Arguments
-import org.hammerlab.guacamole.{SparkCommand, ReadSet, Bases}
-import org.hammerlab.guacamole.pileup.{PileupElement, Pileup}
-import org.hammerlab.guacamole.{ ReadSet, Bases }
+import org.hammerlab.guacamole._
 import org.hammerlab.guacamole.pileup.{ PileupElement, Pileup }
+import org.hammerlab.guacamole.pileup.{ PileupElement, Pileup }
+import org.hammerlab.guacamole.reads.Read
 import org.hammerlab.guacamole.reference.ReferenceBroadcast
 
 import scala.collection.mutable.ArrayBuffer
@@ -385,11 +385,11 @@ object GenomicCharacterization {
       var prevStart = -1
       normalizedCalls.foreach(call => {
         val variantContext = call.toHtsjdVariantContext(sampleName)
-        if (prevChr == variantContext.getChr) {
+        if (prevChr == variantContext.getContig) {
           assert(variantContext.getStart >= prevStart,
             "Out of order: expected %d >= %d".format(variantContext.getStart, prevStart))
         }
-        prevChr = variantContext.getChr
+        prevChr = variantContext.getContig
         prevStart = variantContext.getStart
         writer.add(variantContext)
       })
@@ -402,7 +402,7 @@ object GenomicCharacterization {
     override val description = "somatic caller for any number of samples from the same patient"
 
     override def run(args: Arguments, sc: SparkContext): Unit = {
-      val inputs = Input.parseMultiple(args.inputs)
+      val inputs = Inputs.parseMultiple(args.inputs)
 
       if (!args.quiet) {
         println("Running on %d inputs:".format(inputs.length))
