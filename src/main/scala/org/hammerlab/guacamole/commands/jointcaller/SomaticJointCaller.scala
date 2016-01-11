@@ -25,7 +25,7 @@ import org.hammerlab.guacamole._
 import org.hammerlab.guacamole.pileup._
 import org.hammerlab.guacamole.reads._
 import org.hammerlab.guacamole.reference.ReferenceBroadcast
-import org.kohsuke.args4j.{Argument, Option => Args4jOption}
+import org.kohsuke.args4j.{ Argument, Option => Args4jOption }
 
 object SomaticJoint {
   class Arguments extends DistributedUtil.Arguments with NoSequenceDictionary {
@@ -136,13 +136,14 @@ object SomaticJoint {
       val calls = DistributedUtil.pileupFlatMapMultipleRDDs(
         readSets.map(_.mappedReads),
         lociPartitions,
-        false, // skip empty
+        true, // skip empty
         pileups => {
-          val germlineCharacterization = GermlineCharacterization(groupedInputs.normalDNA.map(pileups(_)))
-
+          val normalPileups = groupedInputs.normalDNA.map(pileups(_))
+          val germlineCharacterization = GermlineCharacterization(normalPileups)
           val somaticCharacterization = if (emitSomaticCalls) {
             Some(SomaticCharacterization(
               germlineCharacterization,
+              normalPileups,
               groupedInputs.tumorDNA.map(pileups(_)),
               groupedInputs.tumorRNA.map(pileups(_))))
           } else {
@@ -150,14 +151,14 @@ object SomaticJoint {
           }
 
           val emitGermlineCall = emitGermlineCalls && (
-              germlineCharacterization.isVariant ||
-              broadcastForceCallLoci.value.onContig(pileups(0).referenceName).contains(pileups(0).locus))
+            germlineCharacterization.isVariant ||
+            broadcastForceCallLoci.value.onContig(pileups(0).referenceName).contains(pileups(0).locus))
 
           val emitSomaticCall = emitSomaticCalls && (
             somaticCharacterization.get.isVariant ||
-              broadcastForceCallLoci.value.onContig(pileups(0).referenceName).contains(pileups(0).locus))
+            broadcastForceCallLoci.value.onContig(pileups(0).referenceName).contains(pileups(0).locus))
 
-          val emit = Seq.newBuilder[GenomicCharacterization]
+          val emit = Seq.newBuilder[LocalCharacterization]
           if (emitGermlineCall) {
             emit += germlineCharacterization
           }
@@ -167,24 +168,23 @@ object SomaticJoint {
           emit.result.toIterator
         }, referenceGenome = reference).collect
 
-
       val germlineCalls = calls.filter(_.isInstanceOf[GermlineCharacterization]).map(_.asInstanceOf[GermlineCharacterization])
       val somaticCalls = calls.filter(_.isInstanceOf[SomaticCharacterization]).map(_.asInstanceOf[SomaticCharacterization])
 
       Common.progress("Called %,d germline and %,d somatic variants.".format(germlineCalls.length, somaticCalls.length))
 
       if (args.outSmallGermlineVariants.nonEmpty) {
-          Common.progress("Writing germline variants.")
-          GermlineCharacterization.writeVcf(
-            args.outSmallGermlineVariants, Seq(args.normalSampleName), readSets, germlineCalls, reference.get)
-          Common.progress("Wrote %,d calls to %s".format(germlineCalls.length, args.outSmallGermlineVariants))
+        Common.progress("Writing germline variants.")
+        GermlineCharacterization.writeVcf(
+          args.outSmallGermlineVariants, Seq(args.normalSampleName), readSets, germlineCalls, reference.get)
+        Common.progress("Wrote %,d germline calls to %s".format(germlineCalls.length, args.outSmallGermlineVariants))
       }
 
       if (args.outSmallSomaticVariants.nonEmpty) {
         Common.progress("Writing somatic variants.")
         SomaticCharacterization.writeVcf(
           args.outSmallSomaticVariants, groupedInputs.tumorDNA.map(inputs(_).name), readSets, somaticCalls, reference.get)
-        Common.progress("Wrote %,d calls to %s".format(somaticCalls.length, args.outSmallSomaticVariants))
+        Common.progress("Wrote %,d somatic calls to %s".format(somaticCalls.length, args.outSmallSomaticVariants))
       }
     }
   }

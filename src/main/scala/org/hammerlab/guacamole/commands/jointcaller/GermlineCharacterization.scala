@@ -3,16 +3,15 @@ package org.hammerlab.guacamole.commands.jointcaller
 import java.util
 
 import htsjdk.variant.variantcontext.writer.VariantContextWriterBuilder
-import htsjdk.variant.variantcontext.{GenotypeBuilder, VariantContextBuilder, Allele, VariantContext}
+import htsjdk.variant.variantcontext.{Allele, GenotypeBuilder, VariantContext, VariantContextBuilder}
 import htsjdk.variant.vcf._
-import org.hammerlab.guacamole.{ReadSet, Bases}
-import org.hammerlab.guacamole.commands.jointcaller.GenomicCharacterization.PileupStats
+import org.hammerlab.guacamole.commands.jointcaller.LocalCharacterization.PileupStats
 import org.hammerlab.guacamole.pileup.Pileup
 import org.hammerlab.guacamole.reference.ReferenceBroadcast
+import org.hammerlab.guacamole.{Bases, ReadSet}
 
 import scala.collection.mutable.ArrayBuffer
-import scala.collection.{mutable, JavaConversions}
-
+import scala.collection.{JavaConversions, mutable}
 
 case class GermlineCharacterization(contig: String,
                                     position: Long,
@@ -23,7 +22,7 @@ case class GermlineCharacterization(contig: String,
                                     allelicDepths: Map[String, (Int, Int)], // allele -> (total, positive strand) depth: Int,
                                     depth: Int,
                                     logUnnormalizedPosteriors: Map[(String, String), Double])
-  extends GenomicCharacterization {
+    extends LocalCharacterization {
 
   def topAltAllelicFraction =
     Seq(genotype._1, genotype._2).count(_ == topAlt) * 0.5
@@ -42,7 +41,7 @@ case class GermlineCharacterization(contig: String,
 
   def genotypeQuality = genotypeLikelihoods.sorted.seq(1)
 
-  def toHtsjdVariantContext(sampleNames: Seq[String]): VariantContext = {
+  def toHtsjdVariantContext(sampleNames: Seq[String], reference: ReferenceBroadcast): VariantContext = {
     def makeHtsjdkAllele(allele: String): Allele = Allele.create(allele, allele == ref)
 
     assume(sampleNames.size == 1)
@@ -57,25 +56,25 @@ case class GermlineCharacterization(contig: String,
     assert(genotype._2.nonEmpty)
 
     new VariantContextBuilder()
-        .chr(contig)
-        .start(position + 1) // one based based inclusive
-        .stop(position + 1 + math.max(ref.length - 1, 0))
+      .chr(contig)
+      .start(position + 1) // one based based inclusive
+      .stop(position + 1 + math.max(ref.length - 1, 0))
       .genotypes(
         new GenotypeBuilder(sampleName)
-            .alleles(JavaConversions.seqAsJavaList(Seq(genotype._1, genotype._2).map(makeHtsjdkAllele _)))
-            .AD(alleles.map(allelicDepths.getOrElse(_, (0, 0))).map(_._1).toArray)
-            .PL(genotypeLikelihoods.toArray)
-            .DP(depth)
-            .GQ(genotypeQuality.toInt)
-            .attribute("RL", logUnnormalizedPosteriors.map(
-              pair => "%s/%s=%1.2f".format(pair._1._1, pair._1._2, pair._2)).mkString(" "))
-            // .attribute("SBP",
-            //   alleles.map(allele => "%s=%1.2f".format(allele, strandBias.getOrElse(allele, 0.0))).mkString(" "))
-            .attribute("ADP",
-              alleles.map(allele => {
-                val totalAndPositive = allelicDepths.getOrElse(allele, (0, 0))
-                "%s=%d/%d".format(allele, totalAndPositive._2, totalAndPositive._1)
-              }).mkString(" "))
+          .alleles(JavaConversions.seqAsJavaList(Seq(genotype._1, genotype._2).map(makeHtsjdkAllele _)))
+          .AD(alleles.map(allelicDepths.getOrElse(_, (0, 0))).map(_._1).toArray)
+          .PL(genotypeLikelihoods.toArray)
+          .DP(depth)
+          .GQ(genotypeQuality.toInt)
+          .attribute("RL", logUnnormalizedPosteriors.map(
+            pair => "%s/%s=%1.2f".format(pair._1._1, pair._1._2, pair._2)).mkString(" "))
+          // .attribute("SBP",
+          //   alleles.map(allele => "%s=%1.2f".format(allele, strandBias.getOrElse(allele, 0.0))).mkString(" "))
+          .attribute("ADP",
+            alleles.map(allele => {
+              val totalAndPositive = allelicDepths.getOrElse(allele, (0, 0))
+              "%s=%d/%d".format(allele, totalAndPositive._2, totalAndPositive._1)
+            }).mkString(" "))
           .make)
       .alleles(JavaConversions.seqAsJavaList(alleles.map(makeHtsjdkAllele _)))
       .make
@@ -220,11 +219,11 @@ object GermlineCharacterization {
   }
 
   def writeVcf(
-                path: String,
-                sampleNames: Seq[String],
-                readSets: Seq[ReadSet],
-                calls: Iterable[GermlineCharacterization],
-                reference: ReferenceBroadcast) = {
+    path: String,
+    sampleNames: Seq[String],
+    readSets: Seq[ReadSet],
+    calls: Iterable[GermlineCharacterization],
+    reference: ReferenceBroadcast) = {
     val writer = new VariantContextWriterBuilder()
       .setOutputFile(path)
       .setReferenceDictionary(readSets(0).sequenceDictionary.get.toSAMSequenceDictionary)
@@ -255,7 +254,7 @@ object GermlineCharacterization {
     var prevChr = ""
     var prevStart = -1
     normalizedCalls.foreach(call => {
-      val variantContext = call.toHtsjdVariantContext(sampleNames)
+      val variantContext = call.toHtsjdVariantContext(sampleNames, reference)
       if (prevChr == variantContext.getContig) {
         assert(variantContext.getStart >= prevStart,
           "Out of order: expected %d >= %d".format(variantContext.getStart, prevStart))

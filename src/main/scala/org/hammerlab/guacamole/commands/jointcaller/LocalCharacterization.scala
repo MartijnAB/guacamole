@@ -4,13 +4,18 @@ import htsjdk.variant.variantcontext.VariantContext
 import org.bdgenomics.adam.util.PhredUtils
 import org.hammerlab.guacamole._
 import org.hammerlab.guacamole.pileup.PileupElement
+import org.hammerlab.guacamole.reference.ReferenceBroadcast
 
-trait GenomicCharacterization {
-  def toHtsjdVariantContext(sampleNames: Seq[String]): VariantContext
+trait LocalCharacterization {
+  val contig: String
+  val position: Long
+  val ref: String
+
+  def toHtsjdVariantContext(sampleNames: Seq[String], reference: ReferenceBroadcast): VariantContext
 }
 
-object GenomicCharacterization {
-  
+object LocalCharacterization {
+
   case class PileupStats(ref: String, elements: Seq[PileupElement]) {
     val alleleStats = elements.sortBy(_.qualityScore * -1).groupBy(element => {
       Bases.basesToString(element.sequencedBases).toUpperCase
@@ -50,6 +55,5 @@ object GenomicCharacterization {
   object PileupStats {
 
   }
-
 
 }

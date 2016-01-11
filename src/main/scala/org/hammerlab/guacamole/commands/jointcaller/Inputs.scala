@@ -38,7 +38,8 @@ object Inputs {
       val keyValues = URLEncodedUtils.parse(parsed.getFragment, org.apache.http.Consts.UTF_8)
       var tissueType: Option[TissueType.Value] = defaults.map(_.tissueType)
       var analyte: Option[Analyte.Value] = defaults.map(_.analyte)
-      var name = defaults.map(_.name).filter(_.nonEmpty).getOrElse(urlWithoutFragment)
+      var name = defaults.map(_.name).filter(_.nonEmpty).getOrElse(
+        urlWithoutFragment.split('/').last.stripSuffix(".bam"))
       JavaConversions.iterableAsScalaIterable(keyValues).foreach(pair => {
         val value = pair.getValue.toLowerCase
         pair.getName.toLowerCase match {
