@@ -100,27 +100,21 @@ object Bases {
     bases.map(_.toChar).mkString
   }
 
-  // Masked lower case bases
-  val a = "a".getBytes()(0)
-  val t = "t".getBytes()(0)
-  val c = "c".getBytes()(0)
-  val g = "g".getBytes()(0)
-  val n = "n".getBytes()(0)
-
   /**
    * Convert a mixed sequence of bases (lower and upper-case) to upper case
    * Lower-case bases typically represent masked bases
    *
+   * Works in place.
+   *
    * @param bases Byte array of bases
    * @return Unmasked (upper-case) byte array of bases
    */
-  def unmaskBases(bases: Array[Byte]): Array[Byte] = {
+  def unmaskBases(bases: Array[Byte]): Unit = {
     // We modify the array in place.
     var i = 0
     while (i < bases.length) {
-      bases(i) = (bases(i) | 32).toByte  // force upper-case by setting 6'th bit
+      bases(i) = java.lang.Character.toUpperCase(bases(i)).toByte
       i += 1
     }
-    bases
   }
 }

@@ -18,12 +18,12 @@ object SmallCharacterization {
     })
     val alleleStats = alleleToElements
       .mapValues(items => {
-      val positive = items.filter(_.read.isPositiveStrand)
-      val negative = items.filter(!_.read.isPositiveStrand)
-      val numToTake = Math.max(Math.min(positive.size, negative.size), 3)
-      val adjustedItems = positive.take(numToTake) ++ negative.take(numToTake)
-      (items.size, positive.size, adjustedItems)
-    })
+        val positive = items.filter(_.read.isPositiveStrand)
+        val negative = items.filter(!_.read.isPositiveStrand)
+        val numToTake = Math.max(Math.min(positive.size, negative.size), 3)
+        val adjustedItems = positive.take(numToTake) ++ negative.take(numToTake)
+        (items.size, positive.size, adjustedItems)
+      })
     val allelicDepths = alleleStats.mapValues(item => (item._1, item._2))
     val downsampledElements = alleleStats.mapValues(_._3).values.flatten
 

@@ -8,6 +8,8 @@ import org.apache.spark.SparkContext
 import org.apache.spark.broadcast.Broadcast
 import org.hammerlab.guacamole.Bases
 
+import scala.collection.mutable
+
 case class ReferenceBroadcast(broadcastedContigs: Map[String, Broadcast[Array[Byte]]]) extends ReferenceGenome {
 
   override def getContig(contigName: String): Array[Byte] = {
@@ -29,6 +31,7 @@ case class ReferenceBroadcast(broadcastedContigs: Map[String, Broadcast[Array[By
 }
 
 object ReferenceBroadcast {
+  val cache = mutable.HashMap.empty[String, (SparkContext, ReferenceBroadcast)]
 
   /**
    * Build a map from contig name to broadcasted reference sequence
@@ -37,23 +40,26 @@ object ReferenceBroadcast {
    * @return ReferenceBroadcast which maps contig/chromosome names to broadcasted sequences
    */
   def apply(fastaPath: String, sc: SparkContext): ReferenceBroadcast = {
-
-    val referenceFasta = new FastaSequenceFile(new File(fastaPath), true)
-    var nextSequence = referenceFasta.nextSequence()
-    val broadcastedSequences = Map.newBuilder[String, Broadcast[Array[Byte]]]
-    while (nextSequence != null) {
-      val sequenceName = nextSequence.getName
-      val sequence = Bases.unmaskBases(nextSequence.getBases)
-      val broadcastedSequence = sc.broadcast(sequence)
-
-      broadcastedSequences += ((sequenceName, broadcastedSequence))
-
-      nextSequence = referenceFasta.nextSequence()
+    val lookup = cache.get(fastaPath)
+    if (lookup.exists(_._1 == sc)) {
+      lookup.get._2
+    } else {
+      val referenceFasta = new FastaSequenceFile(new File(fastaPath), true)
+      var nextSequence = referenceFasta.nextSequence()
+      val broadcastedSequences = Map.newBuilder[String, Broadcast[Array[Byte]]]
+      while (nextSequence != null) {
+        val sequenceName = nextSequence.getName
+        val sequence = nextSequence.getBases
+        Bases.unmaskBases(sequence)
+        val broadcastedSequence = sc.broadcast(sequence)
+        broadcastedSequences += ((sequenceName, broadcastedSequence))
+        nextSequence = referenceFasta.nextSequence()
+      }
+      val result = ReferenceBroadcast(broadcastedSequences.result)
+      cache.put(fastaPath, (sc, result))
+      result
     }
-
-    ReferenceBroadcast(broadcastedSequences.result)
   }
-
 }
 
 case class ContigNotFound(contigName: String, availableContigs: Iterable[String])
