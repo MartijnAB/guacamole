@@ -21,13 +21,13 @@ package org.hammerlab.guacamole.commands
 import java.io.File
 
 import au.com.bytecode.opencsv.CSVParser
-import htsjdk.variant.variantcontext.{GenotypeBuilder, Allele, VariantContextBuilder, VariantContext}
+import htsjdk.variant.variantcontext.{ GenotypeBuilder, Allele, VariantContextBuilder, VariantContext }
 import htsjdk.variant.vcf.VCFFileReader
 import org.hammerlab.guacamole.commands.jointcaller.SomaticJoint
 import SomaticJoint.Arguments
 import org.hammerlab.guacamole.reference.ReferenceBroadcast
 import org.hammerlab.guacamole.util.{ TestUtil, GuacFunSuite }
-import org.hammerlab.guacamole.{LociSet, LociMap, Bases}
+import org.hammerlab.guacamole.{ LociSet, LociMap, Bases }
 import org.hammerlab.guacamole.filters.SomaticGenotypeFilter
 import org.hammerlab.guacamole.pileup.Pileup
 import org.hammerlab.guacamole.reads.MappedRead
@@ -80,15 +80,15 @@ class SomaticJointCallerIntegrationTests extends GuacFunSuite with Matchers {
   }
 
   case class VariantFromVarlensCSV(
-    genome: String,
-    contig: String,
-    interbaseStart: Int,
-    interbaseEnd: Int,
-    ref: String,
-    alt: String,
-    tumor: String,
-    normal: String,
-    validation: String) {
+      genome: String,
+      contig: String,
+      interbaseStart: Int,
+      interbaseEnd: Int,
+      ref: String,
+      alt: String,
+      tumor: String,
+      normal: String,
+      validation: String) {
 
     def toHtsjdVariantContext(reference: ReferenceBroadcast): VariantContext = {
       val uncanonicalizedContig = "chr" + contig
@@ -112,9 +112,9 @@ class SomaticJointCallerIntegrationTests extends GuacFunSuite with Matchers {
         .make
 
       new VariantContextBuilder()
-      .chr(uncanonicalizedContig)
-      .start(adjustedInterbaseStart + 1) // one based based inclusive
-      .stop(adjustedInterbaseStart + 1 + math.max(adjustedRef.length - 1, 0))
+        .chr(uncanonicalizedContig)
+        .start(adjustedInterbaseStart + 1) // one based based inclusive
+        .stop(adjustedInterbaseStart + 1 + math.max(adjustedRef.length - 1, 0))
         .genotypes(JavaConversions.seqAsJavaList(Seq(genotype)))
         .alleles(JavaConversions.seqAsJavaList(alleles.map(makeHtsjdkAllele _)))
         .make

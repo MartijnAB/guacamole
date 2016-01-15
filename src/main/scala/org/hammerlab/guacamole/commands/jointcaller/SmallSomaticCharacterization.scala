@@ -3,82 +3,33 @@ package org.hammerlab.guacamole.commands.jointcaller
 import java.util
 
 import htsjdk.variant.variantcontext.writer.VariantContextWriterBuilder
-import htsjdk.variant.variantcontext.{Allele, GenotypeBuilder, VariantContext, VariantContextBuilder}
+import htsjdk.variant.variantcontext.{ Allele, GenotypeBuilder, VariantContext, VariantContextBuilder }
 import htsjdk.variant.vcf._
 import org.hammerlab.guacamole.DistributedUtil._
-import org.hammerlab.guacamole.commands.jointcaller.LocalCharacterization.PileupStats
+import org.hammerlab.guacamole.commands.jointcaller.SmallCharacterization.PileupStats
 import org.hammerlab.guacamole.pileup.Pileup
 import org.hammerlab.guacamole.reference.ReferenceBroadcast
-import org.hammerlab.guacamole.{Bases, ReadSet}
+import org.hammerlab.guacamole.{ Bases, ReadSet }
 
 import scala.collection.JavaConversions
 
-case class SomaticCharacterization(contig: String,
-                                   position: Long,
-                                   ref: String,
-                                   topAlt: String,
-                                   isVariant: Boolean,
-                                   germlineGenotypeQuality: Int,
-                                   normalPercentError: Double,
-                                   sampleMixtures: PerSample[Map[String, Double]],
-                                   allelicDepthsPerSample: PerSample[Map[String, (Int, Int)]]) // allele -> (total, positive strand)
-    extends LocalCharacterization {
+case class SmallSomaticCharacterization(
+  contig: String,
+  position: Long,
+  ref: String,
+  topAlt: String,
+  pooledCall: Boolean,
+  individualCall: Boolean,
+  germlineGenotypeQuality: Int,
+  normalPercentError: Double,
+  sampleMixtures: PerSample[Map[String, Double]],
+  allelicDepthsPerSample: PerSample[Map[String, (Int, Int)]]) // allele -> (total, positive strand)
+    extends SmallCharacterization {
 
-  def toHtsjdVariantContext(sampleNames: Seq[String], reference: ReferenceBroadcast): VariantContext = {
-    val (adjustedPosition, adjustAllele) = if (topAlt.nonEmpty) {
-      (position, (allele: String) => allele)
-    } else {
-      val refSeqeunce = Bases.basesToString(
-        reference.getReferenceSequence(contig, position.toInt - 1, position.toInt + 1)).toUpperCase
-      (position - 1, (allele: String) => refSeqeunce(0) + allele)
-    }
-
-    val alleles = Seq(adjustAllele(ref), adjustAllele(topAlt)).distinct
-
-    def makeHtsjdkAllele(allele: String): Allele = Allele.create(allele, allele == adjustAllele(ref))
-    
-    val genotypes = sampleNames.zipWithIndex.map({
-      case (name, sampleIndex) => {
-        val allelicDepths = allelicDepthsPerSample(sampleIndex).map(kv => (adjustAllele(kv._1) -> kv._2))
-        val sampleMixture = sampleMixtures(sampleIndex)
-        val sampleAlleles = sampleMixture.keys.toSeq.map(adjustAllele)
-        val duplicatedSampleAlleles = if (sampleAlleles.length == 1)
-          Seq(sampleAlleles(0), sampleAlleles(0))
-        else
-          sampleAlleles
-
-        new GenotypeBuilder(name)
-          .alleles(JavaConversions.seqAsJavaList(duplicatedSampleAlleles.map(makeHtsjdkAllele _)))
-          .AD(alleles.map(allelicDepths.getOrElse(_, (0, 0))).map(_._1).toArray)
-          .attribute("GGQ", germlineGenotypeQuality)
-          .attribute("NPE", normalPercentError)
-          // .PL(genotypeLikelihoods.toArray)
-          // .DP(depth)
-          // .GQ(genotypeQuality.toInt)
-          // .attribute("RL", logUnnormalizedPosteriors.map(
-          //   pair => "%s/%s=%1.2f".format(pair._1._1, pair._1._2, pair._2)).mkString(" "))
-          // .attribute("SBP",
-          //   alleles.map(allele => "%s=%1.2f".format(allele, strandBias.getOrElse(allele, 0.0))).mkString(" "))
-          .attribute("ADP",
-            alleles.map(allele => {
-              val totalAndPositive = allelicDepths.getOrElse(allele, (0, 0))
-              "%s=%d/%d".format(allele, totalAndPositive._2, totalAndPositive._1)
-            }).mkString(" "))
-          .make
-      }
-    })
-
-    new VariantContextBuilder()
-      .chr(contig)
-      .start(adjustedPosition + 1) // one based based inclusive
-      .stop(adjustedPosition + 1 + math.max(adjustAllele(ref).length - 1, 0))
-      .genotypes(JavaConversions.seqAsJavaList(genotypes))
-      .alleles(JavaConversions.seqAsJavaList(alleles.map(makeHtsjdkAllele _)))
-      .make
-  }
+  def isVariant = pooledCall || individualCall
 
 }
-object SomaticCharacterization {
+object SmallSomaticCharacterization {
 
   case class Parameters(negativeLog10SomaticVariant: Double = 2,
                         minGermlineGenotypeQuality: Double = 10.0,
@@ -86,12 +37,11 @@ object SomaticCharacterization {
                         percentContaminationOfNormalWithTumor: Double = 0.0) {}
   val default = Parameters()
 
-  def apply(germlineCharacterization: GermlineCharacterization,
+  def apply(germlineCharacterization: SmallGermlineCharacterization,
             normalDNAPileups: Seq[Pileup],
             tumorDNAPileups: Seq[Pileup],
             tumorRNAPileups: Seq[Pileup],
-            parameters: Parameters = default): SomaticCharacterization = {
-    
+            parameters: Parameters = default): SmallSomaticCharacterization = {
 
     // We call a variant if we reject the null hypothesis in a likelihood ratio test for EITHER an individual
     // sample OR the pooled data.
@@ -139,13 +89,14 @@ object SomaticCharacterization {
     val noCallGenotype = Map(ref -> 1.0)
     def noCallGenotypesPerSample = tumorDNAPileups.map(pileup => noCallGenotype)
 
-    def makeResult(called: Boolean, perSampleGenotypes: PerSample[Map[String, Double]]): SomaticCharacterization = {
-      SomaticCharacterization(
+    def makeResult(triggerPooled: Boolean, triggerIndividual: Boolean, perSampleGenotypes: PerSample[Map[String, Double]]): SmallSomaticCharacterization = {
+      SmallSomaticCharacterization(
         tumorDNAPileups(0).referenceName,
         tumorDNAPileups(0).locus,
         ref,
         topAlt,
-        called,
+        triggerPooled,
+        triggerIndividual,
         germlineCharacterization.genotypeQuality,
         normalErrorRate * 100.0,
         perSampleGenotypes,
@@ -154,30 +105,87 @@ object SomaticCharacterization {
 
     if (germlineCharacterization.isVariant) {
       // TODO: call LOH or reversion to normal.
-      makeResult(false, noCallGenotypesPerSample)
+      makeResult(false, false, noCallGenotypesPerSample)
     } else {
       val normalDNASupportsCalling = germlineCharacterization.genotypeQuality >= parameters.minGermlineGenotypeQuality &&
-          normalErrorRate <= parameters.maxGermlineErrorRatePercent / 100.0
+        normalErrorRate <= parameters.maxGermlineErrorRatePercent / 100.0
 
       if (!normalDNASupportsCalling) {
         // Not a high quality enough germline call to do a somatic call.
-        makeResult(false, noCallGenotypesPerSample)
+        makeResult(false, false, noCallGenotypesPerSample)
       } else {
         // Calling a regular somatic SNV.
         val pooledPosteriors = unnormalizedPosteriors(pooledStats)
         val perSamplePosteriors = sampleStats.map(unnormalizedPosteriors _)
         val perSampleGenotypes = perSamplePosteriors.map(call _)
-        val called = call(pooledPosteriors) != noCallGenotype || perSampleGenotypes.exists(_ != noCallGenotype)
-        makeResult(called, perSampleGenotypes)
+        makeResult(call(pooledPosteriors) != noCallGenotype, perSampleGenotypes.exists(_ != noCallGenotype), perSampleGenotypes)
       }
     }
+  }
+
+  def makeHtsjdVariantContext(item: SmallSomaticCharacterization, sampleNames: Seq[String], reference: ReferenceBroadcast): VariantContext = {
+    val (adjustedPosition, adjustAllele) = if (item.topAlt.nonEmpty) {
+      (item.position, (allele: String) => allele)
+    } else {
+      val refSeqeunce = Bases.basesToString(
+        reference.getReferenceSequence(item.contig, item.position.toInt - 1, item.position.toInt + 1)).toUpperCase
+      (item.position - 1, (allele: String) => refSeqeunce(0) + allele)
+    }
+
+    val alleles = Seq(adjustAllele(item.ref), adjustAllele(item.topAlt)).distinct
+
+    def makeHtsjdkAllele(allele: String): Allele = Allele.create(allele, allele == adjustAllele(item.ref))
+
+    val genotypes = sampleNames.zipWithIndex.map({
+      case (name, sampleIndex) => {
+        val allelicDepths = item.allelicDepthsPerSample(sampleIndex).map(kv => (adjustAllele(kv._1) -> kv._2))
+        val sampleMixture = item.sampleMixtures(sampleIndex)
+        val sampleAlleles = sampleMixture.keys.toSeq.map(adjustAllele)
+        val duplicatedSampleAlleles = if (sampleAlleles.length == 1)
+          Seq(sampleAlleles(0), sampleAlleles(0))
+        else
+          sampleAlleles
+
+        new GenotypeBuilder(name)
+          .alleles(JavaConversions.seqAsJavaList(duplicatedSampleAlleles.map(makeHtsjdkAllele _)))
+          .AD(alleles.map(allelicDepths.getOrElse(_, (0, 0))).map(_._1).toArray)
+          .attribute("GGQ", item.germlineGenotypeQuality)
+          .attribute("NPE", item.normalPercentError)
+          // .PL(genotypeLikelihoods.toArray)
+          // .DP(depth)
+          // .GQ(genotypeQuality.toInt)
+          // .attribute("RL", logUnnormalizedPosteriors.map(
+          //   pair => "%s/%s=%1.2f".format(pair._1._1, pair._1._2, pair._2)).mkString(" "))
+          // .attribute("SBP",
+          //   alleles.map(allele => "%s=%1.2f".format(allele, strandBias.getOrElse(allele, 0.0))).mkString(" "))
+          .attribute("ADP",
+            alleles.map(allele => {
+              val totalAndPositive = allelicDepths.getOrElse(allele, (0, 0))
+              "%s=%d/%d".format(allele, totalAndPositive._2, totalAndPositive._1)
+            }).mkString(" "))
+          .make
+      }
+    })
+
+    val trigger = (
+      (if (item.pooledCall) Seq("POOLED") else Seq.empty) ++
+      (if (item.individualCall) Seq("INDIVIDUAL") else Seq.empty)).mkString("+")
+
+    new VariantContextBuilder()
+      .chr(item.contig)
+      .start(adjustedPosition + 1) // one based based inclusive
+      .stop(adjustedPosition + 1 + math.max(adjustAllele(item.ref).length - 1, 0))
+      .genotypes(JavaConversions.seqAsJavaList(genotypes))
+      .alleles(JavaConversions.seqAsJavaList(alleles.map(makeHtsjdkAllele _)))
+      .attribute("TRIGGER", if (trigger.nonEmpty) trigger else "NONE")
+      .make
   }
 
   def writeVcf(
     path: String,
     sampleNames: Seq[String],
     readSets: Seq[ReadSet],
-    calls: Iterable[SomaticCharacterization],
+    calls: Iterable[SmallSomaticCharacterization],
     reference: ReferenceBroadcast) = {
 
     val writer = new VariantContextWriterBuilder()
@@ -200,6 +208,9 @@ object SomaticCharacterization {
     headerLines.add(new VCFFormatHeaderLine("GGQ", 1, VCFHeaderLineType.Integer, "germline call genotype quality"))
     headerLines.add(new VCFFormatHeaderLine("NPE", 1, VCFHeaderLineType.Integer, "percent errors in normal"))
 
+    // INFO
+    headerLines.add(new VCFInfoHeaderLine("TRIGGER", 1, VCFHeaderLineType.String,
+      "Which likelihood ratio test triggered call: POOLED and/or INDIVIDUAL"))
 
     val header = new VCFHeader(headerLines, JavaConversions.seqAsJavaList(sampleNames))
     header.setSequenceDictionary(readSets(0).sequenceDictionary.get.toSAMSequenceDictionary)
@@ -211,7 +222,7 @@ object SomaticCharacterization {
     var prevChr = ""
     var prevStart = -1
     calls.foreach(call => {
-      val variantContext = call.toHtsjdVariantContext(sampleNames, reference)
+      val variantContext = makeHtsjdVariantContext(call, sampleNames, reference)
       if (prevChr == variantContext.getContig) {
         assert(variantContext.getStart >= prevStart,
           "Out of order: expected %d >= %d".format(variantContext.getStart, prevStart))

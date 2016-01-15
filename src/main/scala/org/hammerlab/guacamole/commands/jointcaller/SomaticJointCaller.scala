@@ -40,6 +40,9 @@ object SomaticJoint {
     @Args4jOption(name = "--force-call-loci", usage = "Always call the given sites")
     var forceCallLoci: String = ""
 
+    @Args4jOption(name = "--somatic-at-germline", usage = "Output somatic characterizations at all germline variant sites")
+    var somaticAtGermline: Boolean = false
+
     @Args4jOption(name = "--normal-sample-name", usage = "Sample name to use for VCF output of germline calls")
     var normalSampleName: String = "NORMAL"
 
@@ -132,6 +135,7 @@ object SomaticJoint {
 
       val emitGermlineCalls = args.outSmallGermlineVariants.nonEmpty
       val emitSomaticCalls = args.outSmallSomaticVariants.nonEmpty
+      val somaticAtGermline = args.somaticAtGermline
 
       val calls = DistributedUtil.pileupFlatMapMultipleRDDs(
         readSets.map(_.mappedReads),
@@ -139,50 +143,63 @@ object SomaticJoint {
         true, // skip empty
         pileups => {
           val normalPileups = groupedInputs.normalDNA.map(pileups(_))
-          val germlineCharacterization = GermlineCharacterization(normalPileups)
-          val somaticCharacterization = if (emitSomaticCalls) {
-            Some(SomaticCharacterization(
-              germlineCharacterization,
-              normalPileups,
-              groupedInputs.tumorDNA.map(pileups(_)),
-              groupedInputs.tumorRNA.map(pileups(_))))
+          val tumorDNAPileups = groupedInputs.tumorDNA.map(pileups(_))
+          val forceCall = broadcastForceCallLoci.value.onContig(pileups(0).referenceName).contains(pileups(0).locus)
+
+          def hasAlt(pileup: Pileup): Boolean = {
+            pileup.referenceDepth != pileup.depth
+          }
+
+          // As an optimization, we only build the characterizations if there are any alt reads
+          // at this site.
+          if (forceCall || normalPileups.exists(hasAlt _) || tumorDNAPileups.exists(hasAlt _)) {
+            val germlineCharacterization = SmallGermlineCharacterization(normalPileups)
+            val somaticCharacterization = if (emitSomaticCalls) {
+              Some(SmallSomaticCharacterization(
+                germlineCharacterization,
+                normalPileups,
+                tumorDNAPileups,
+                groupedInputs.tumorRNA.map(pileups(_))))
+            } else {
+              None
+            }
+
+            val emitGermlineCall = emitGermlineCalls && (
+              germlineCharacterization.isVariant || forceCall)
+
+            val emitSomaticCall = emitSomaticCalls && (
+              somaticCharacterization.get.isVariant ||
+              (somaticAtGermline && germlineCharacterization.isVariant) ||
+              forceCall)
+
+            val emit = Seq.newBuilder[SmallCharacterization]
+            if (emitGermlineCall) {
+              emit += germlineCharacterization
+            }
+            if (emitSomaticCall) {
+              emit += somaticCharacterization.get
+            }
+            emit.result.toIterator
           } else {
-            None
+            Iterator.empty
           }
-
-          val emitGermlineCall = emitGermlineCalls && (
-            germlineCharacterization.isVariant ||
-            broadcastForceCallLoci.value.onContig(pileups(0).referenceName).contains(pileups(0).locus))
-
-          val emitSomaticCall = emitSomaticCalls && (
-            somaticCharacterization.get.isVariant ||
-            broadcastForceCallLoci.value.onContig(pileups(0).referenceName).contains(pileups(0).locus))
-
-          val emit = Seq.newBuilder[LocalCharacterization]
-          if (emitGermlineCall) {
-            emit += germlineCharacterization
-          }
-          if (emitSomaticCall) {
-            emit += somaticCharacterization.get
-          }
-          emit.result.toIterator
         }, referenceGenome = reference).collect
 
-      val germlineCalls = calls.filter(_.isInstanceOf[GermlineCharacterization]).map(_.asInstanceOf[GermlineCharacterization])
-      val somaticCalls = calls.filter(_.isInstanceOf[SomaticCharacterization]).map(_.asInstanceOf[SomaticCharacterization])
+      val germlineCalls = calls.filter(_.isInstanceOf[SmallGermlineCharacterization]).map(_.asInstanceOf[SmallGermlineCharacterization])
+      val somaticCalls = calls.filter(_.isInstanceOf[SmallSomaticCharacterization]).map(_.asInstanceOf[SmallSomaticCharacterization])
 
       Common.progress("Called %,d germline and %,d somatic variants.".format(germlineCalls.length, somaticCalls.length))
 
       if (args.outSmallGermlineVariants.nonEmpty) {
         Common.progress("Writing germline variants.")
-        GermlineCharacterization.writeVcf(
+        SmallGermlineCharacterization.writeVcf(
           args.outSmallGermlineVariants, Seq(args.normalSampleName), readSets, germlineCalls, reference.get)
         Common.progress("Wrote %,d germline calls to %s".format(germlineCalls.length, args.outSmallGermlineVariants))
       }
 
       if (args.outSmallSomaticVariants.nonEmpty) {
         Common.progress("Writing somatic variants.")
-        SomaticCharacterization.writeVcf(
+        SmallSomaticCharacterization.writeVcf(
           args.outSmallSomaticVariants, groupedInputs.tumorDNA.map(inputs(_).name), readSets, somaticCalls, reference.get)
         Common.progress("Wrote %,d somatic calls to %s".format(somaticCalls.length, args.outSmallSomaticVariants))
       }

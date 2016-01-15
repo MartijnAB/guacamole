@@ -78,6 +78,7 @@ object TestUtil extends Matchers {
 
     Read(
       sequence,
+      name = "read1",
       cigarString = cigar,
       mdTagString = Some(mdtag),
       start = start,
@@ -107,6 +108,7 @@ object TestUtil extends Matchers {
     PairedRead(
       Read(
         sequence,
+        name = "read1",
         cigarString = cigar,
         start = start,
         referenceContig = chr,

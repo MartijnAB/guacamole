@@ -6,16 +6,12 @@ import org.hammerlab.guacamole._
 import org.hammerlab.guacamole.pileup.PileupElement
 import org.hammerlab.guacamole.reference.ReferenceBroadcast
 
-trait LocalCharacterization {
+trait SmallCharacterization {
   val contig: String
   val position: Long
-  val ref: String
-
-  def toHtsjdVariantContext(sampleNames: Seq[String], reference: ReferenceBroadcast): VariantContext
 }
 
-object LocalCharacterization {
-
+object SmallCharacterization {
   case class PileupStats(ref: String, elements: Seq[PileupElement]) {
     val alleleStats = elements.sortBy(_.qualityScore * -1).groupBy(element => {
       Bases.basesToString(element.sequencedBases).toUpperCase

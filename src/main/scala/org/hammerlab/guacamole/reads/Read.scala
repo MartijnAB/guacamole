@@ -51,6 +51,9 @@ trait Read {
    */
   def token: Int
 
+  /* The template name. A read, its mate, and any alternate alignments have the same name. */
+  def name: String
+
   /** The nucleotide sequence. */
   def sequence: Seq[Byte]
 
@@ -156,6 +159,7 @@ object Read extends Logging {
    */
   def apply(
     sequence: String,
+    name: String,
     token: Int = 0,
     baseQualities: String = "",
     isDuplicate: Boolean = false,
@@ -175,6 +179,7 @@ object Read extends Logging {
     val cigar = TextCigarCodec.decode(cigarString)
     MappedRead(
       token,
+      name,
       sequenceArray,
       qualityScoresArray,
       isDuplicate,
@@ -252,6 +257,7 @@ object Read extends Logging {
 
       val result = MappedRead(
         token,
+        record.getReadName,
         record.getReadString.getBytes,
         record.getBaseQualities,
         record.getDuplicateReadFlag,
@@ -274,6 +280,7 @@ object Read extends Logging {
     } else {
       UnmappedRead(
         token,
+        record.getReadName,
         record.getReadString.getBytes,
         record.getBaseQualities,
         record.getDuplicateReadFlag,
@@ -531,6 +538,7 @@ object Read extends Logging {
     val read = if (alignmentRecord.getReadMapped) {
       MappedRead(
         token = token,
+        name = alignmentRecord.getReadName,
         sequence = sequence,
         baseQualities = baseQualities,
         isDuplicate = alignmentRecord.getDuplicateRead,
@@ -547,6 +555,7 @@ object Read extends Logging {
     } else {
       UnmappedRead(
         token = token,
+        name = alignmentRecord.getReadName,
         sequence = sequence,
         baseQualities = baseQualities,
         isDuplicate = alignmentRecord.getDuplicateRead,

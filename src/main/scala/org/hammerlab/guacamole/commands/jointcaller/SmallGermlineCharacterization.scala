@@ -3,26 +3,28 @@ package org.hammerlab.guacamole.commands.jointcaller
 import java.util
 
 import htsjdk.variant.variantcontext.writer.VariantContextWriterBuilder
-import htsjdk.variant.variantcontext.{Allele, GenotypeBuilder, VariantContext, VariantContextBuilder}
+import htsjdk.variant.variantcontext.{ Allele, GenotypeBuilder, VariantContext, VariantContextBuilder }
 import htsjdk.variant.vcf._
-import org.hammerlab.guacamole.commands.jointcaller.LocalCharacterization.PileupStats
+import org.hammerlab.guacamole.commands.jointcaller.SmallCharacterization.PileupStats
 import org.hammerlab.guacamole.pileup.Pileup
 import org.hammerlab.guacamole.reference.ReferenceBroadcast
-import org.hammerlab.guacamole.{Bases, ReadSet}
+import org.hammerlab.guacamole.{ Bases, ReadSet }
 
 import scala.collection.mutable.ArrayBuffer
-import scala.collection.{JavaConversions, mutable}
+import scala.collection.{ JavaConversions, mutable }
 
-case class GermlineCharacterization(contig: String,
-                                    position: Long,
-                                    ref: String,
-                                    topAlt: String,
-                                    secondAlt: String,
-                                    genotype: (String, String),
-                                    allelicDepths: Map[String, (Int, Int)], // allele -> (total, positive strand) depth: Int,
-                                    depth: Int,
-                                    logUnnormalizedPosteriors: Map[(String, String), Double])
-    extends LocalCharacterization {
+case class SmallGermlineCharacterization(contig: String,
+                                         position: Long,
+                                         ref: String,
+                                         topAlt: String,
+                                         secondAlt: String,
+                                         genotype: (String, String),
+                                         allelicDepths: Map[String, (Int, Int)], // allele -> (total, positive strand) depth: Int,
+                                         depth: Int,
+                                         logUnnormalizedPosteriors: Map[(String, String), Double],
+                                         readSupportRef: Set[String],
+                                         readSupportAlt: Set[String])
+    extends SmallCharacterization {
 
   def topAltAllelicFraction =
     Seq(genotype._1, genotype._2).count(_ == topAlt) * 0.5
@@ -35,59 +37,20 @@ case class GermlineCharacterization(contig: String,
   def possibleGenotypes = Seq((ref, ref), (ref, topAlt), (topAlt, topAlt)) ++
     (if (secondAlt != "N") Seq((topAlt, secondAlt)) else Seq.empty)
 
-  def genotypeLikelihoods = GermlineCharacterization.logPosteriorsToNormalizedPhred(
+  def genotypeLikelihoods = SmallGermlineCharacterization.logPosteriorsToNormalizedPhred(
     possibleGenotypes.map(
       value => logUnnormalizedPosteriors.getOrElse(value, Double.NegativeInfinity))).map(_.toInt)
 
   def genotypeQuality = genotypeLikelihoods.sorted.seq(1)
-
-  def toHtsjdVariantContext(sampleNames: Seq[String], reference: ReferenceBroadcast): VariantContext = {
-    def makeHtsjdkAllele(allele: String): Allele = Allele.create(allele, allele == ref)
-
-    assume(sampleNames.size == 1)
-    val sampleName = sampleNames(0)
-
-    val alleles = Seq(ref, genotype._1, genotype._2).distinct
-
-    // If there is a true second alt with evidence, the PL field will have 4 values (hom ref, het, hom alt, compound
-    // alt), otherwise just 3. GATK always gives the 3-genotype version.
-
-    assert(genotype._1.nonEmpty)
-    assert(genotype._2.nonEmpty)
-
-    new VariantContextBuilder()
-      .chr(contig)
-      .start(position + 1) // one based based inclusive
-      .stop(position + 1 + math.max(ref.length - 1, 0))
-      .genotypes(
-        new GenotypeBuilder(sampleName)
-          .alleles(JavaConversions.seqAsJavaList(Seq(genotype._1, genotype._2).map(makeHtsjdkAllele _)))
-          .AD(alleles.map(allelicDepths.getOrElse(_, (0, 0))).map(_._1).toArray)
-          .PL(genotypeLikelihoods.toArray)
-          .DP(depth)
-          .GQ(genotypeQuality.toInt)
-          .attribute("RL", logUnnormalizedPosteriors.map(
-            pair => "%s/%s=%1.2f".format(pair._1._1, pair._1._2, pair._2)).mkString(" "))
-          // .attribute("SBP",
-          //   alleles.map(allele => "%s=%1.2f".format(allele, strandBias.getOrElse(allele, 0.0))).mkString(" "))
-          .attribute("ADP",
-            alleles.map(allele => {
-              val totalAndPositive = allelicDepths.getOrElse(allele, (0, 0))
-              "%s=%d/%d".format(allele, totalAndPositive._2, totalAndPositive._1)
-            }).mkString(" "))
-          .make)
-      .alleles(JavaConversions.seqAsJavaList(alleles.map(makeHtsjdkAllele _)))
-      .make
-  }
 }
 
-object GermlineCharacterization {
+object SmallGermlineCharacterization {
   case class Parameters(negativeLog10HeterozygousPrior: Double = 2,
                         negativeLog10HomozygousAlternatePrior: Double = 2,
                         negativeLog10CompoundAlternatePrior: Double = 4) {}
   val default = Parameters()
 
-  def apply(normalDNAPileups: Seq[Pileup], parameters: Parameters = default): GermlineCharacterization = {
+  def apply(normalDNAPileups: Seq[Pileup], parameters: Parameters = default): SmallGermlineCharacterization = {
 
     val elements = normalDNAPileups.flatMap(_.elements).filter(_.read.alignmentQuality > 0)
     val depth = elements.length
@@ -117,7 +80,9 @@ object GermlineCharacterization {
     //if (genotype != (ref, ref)) {
     //  println("Adjusted %d -> %d".format(elements.size, downsampledElements.size))
     //}
-    GermlineCharacterization(
+    val alleleToReads = elements.groupBy(element => (Bases.basesToString(element.sequencedBases)))
+      .mapValues(_.map(_.read.name).toSet).withDefaultValue(Set.empty)
+    SmallGermlineCharacterization(
       normalDNAPileups(0).referenceName,
       normalDNAPileups(0).locus,
       ref,
@@ -126,7 +91,9 @@ object GermlineCharacterization {
       genotype,
       stats.allelicDepths,
       depth,
-      logUnnormalizedPosteriors)
+      logUnnormalizedPosteriors,
+      alleleToReads(ref),
+      alleleToReads(stats.topAlt))
   }
 
   def logPosteriorsToNormalizedPhred(log10Probabilities: Seq[Double], log10Precision: Double = -16): Seq[Double] = {
@@ -135,8 +102,8 @@ object GermlineCharacterization {
     rescaled.map(_ * -10)
   }
 
-  def normalizeDeletions(reference: ReferenceBroadcast, calls: Iterable[GermlineCharacterization]): Iterator[GermlineCharacterization] = {
-    def makeDeletion(deletionCalls: Seq[GermlineCharacterization]): GermlineCharacterization = {
+  def normalizeDeletions(reference: ReferenceBroadcast, calls: Iterable[SmallGermlineCharacterization]): Iterator[SmallGermlineCharacterization] = {
+    def makeDeletion(deletionCalls: Seq[SmallGermlineCharacterization]): SmallGermlineCharacterization = {
       val start = deletionCalls.head
       val end = deletionCalls.last
       assume(start.contig == end.contig)
@@ -153,7 +120,7 @@ object GermlineCharacterization {
       def convertAllele(allele: String) =
         refSequence(0) + allele
 
-      GermlineCharacterization(
+      SmallGermlineCharacterization(
         start.contig,
         start.position - 1,
         refSequence,
@@ -163,12 +130,14 @@ object GermlineCharacterization {
         start.allelicDepths.map(pair => convertAllele(pair._1) -> pair._2),
         start.depth,
         start.logUnnormalizedPosteriors.map(
-          pair => (convertAllele(pair._1._1), convertAllele(pair._1._2)) -> pair._2))
+          pair => (convertAllele(pair._1._1), convertAllele(pair._1._2)) -> pair._2),
+        Set.empty,
+        Set.empty)
 
     }
 
-    val results = mutable.ArrayStack[GermlineCharacterization]()
-    val currentDeletion = ArrayBuffer.empty[GermlineCharacterization]
+    val results = mutable.ArrayStack[SmallGermlineCharacterization]()
+    val currentDeletion = ArrayBuffer.empty[SmallGermlineCharacterization]
 
     def maybeEmitDeletion(): Unit = {
       if (currentDeletion.nonEmpty) {
@@ -218,11 +187,50 @@ object GermlineCharacterization {
     results.reverseIterator
   }
 
+  def makeHtsjdVariantContext(item: SmallGermlineCharacterization, sampleNames: Seq[String], reference: ReferenceBroadcast): VariantContext = {
+    def makeHtsjdkAllele(allele: String): Allele = Allele.create(allele, allele == item.ref)
+
+    assume(sampleNames.size == 1)
+    val sampleName = sampleNames(0)
+
+    val alleles = Seq(item.ref, item.genotype._1, item.genotype._2).distinct
+
+    // If there is a true second alt with evidence, the PL field will have 4 values (hom ref, het, hom alt, compound
+    // alt), otherwise just 3. GATK always gives the 3-genotype version.
+
+    assert(item.genotype._1.nonEmpty)
+    assert(item.genotype._2.nonEmpty)
+
+    new VariantContextBuilder()
+      .chr(item.contig)
+      .start(item.position + 1) // one based based inclusive
+      .stop(item.position + 1 + math.max(item.ref.length - 1, 0))
+      .genotypes(
+        new GenotypeBuilder(sampleName)
+          .alleles(JavaConversions.seqAsJavaList(Seq(item.genotype._1, item.genotype._2).map(makeHtsjdkAllele _)))
+          .AD(alleles.map(item.allelicDepths.getOrElse(_, (0, 0))).map(_._1).toArray)
+          .PL(item.genotypeLikelihoods.toArray)
+          .DP(item.depth)
+          .GQ(item.genotypeQuality.toInt)
+          .attribute("RL", item.logUnnormalizedPosteriors.map(
+            pair => "%s/%s=%1.2f".format(pair._1._1, pair._1._2, pair._2)).mkString(" "))
+          // .attribute("SBP",
+          //   alleles.map(allele => "%s=%1.2f".format(allele, strandBias.getOrElse(allele, 0.0))).mkString(" "))
+          .attribute("ADP",
+            alleles.map(allele => {
+              val totalAndPositive = item.allelicDepths.getOrElse(allele, (0, 0))
+              "%s=%d/%d".format(allele, totalAndPositive._2, totalAndPositive._1)
+            }).mkString(" "))
+          .make)
+      .alleles(JavaConversions.seqAsJavaList(alleles.map(makeHtsjdkAllele _)))
+      .make
+  }
+
   def writeVcf(
     path: String,
     sampleNames: Seq[String],
     readSets: Seq[ReadSet],
-    calls: Iterable[GermlineCharacterization],
+    calls: Iterable[SmallGermlineCharacterization],
     reference: ReferenceBroadcast) = {
     val writer = new VariantContextWriterBuilder()
       .setOutputFile(path)
@@ -254,7 +262,7 @@ object GermlineCharacterization {
     var prevChr = ""
     var prevStart = -1
     normalizedCalls.foreach(call => {
-      val variantContext = call.toHtsjdVariantContext(sampleNames, reference)
+      val variantContext = makeHtsjdVariantContext(call, sampleNames, reference)
       if (prevChr == variantContext.getContig) {
         assert(variantContext.getStart >= prevStart,
           "Out of order: expected %d >= %d".format(variantContext.getStart, prevStart))
