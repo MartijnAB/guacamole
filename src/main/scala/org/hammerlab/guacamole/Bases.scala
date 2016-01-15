@@ -18,6 +18,8 @@
 
 package org.hammerlab.guacamole
 
+import scala.collection.mutable.ArrayBuffer
+
 /**
  * We represent a nucleotide base as a Byte, whose value is equal to the ASCII value of the character representing the
  * base (for example: A, C, T, G). We represent a nucleotide sequence as a Seq[Byte].
@@ -113,16 +115,12 @@ object Bases {
    * @return Unmasked (upper-case) byte array of bases
    */
   def unmaskBases(bases: Array[Byte]): Array[Byte] = {
-    bases.map(base =>
-      base match {
-        case (Bases.A | Bases.a) => Bases.A
-        case (Bases.G | Bases.g) => Bases.G
-        case (Bases.T | Bases.t) => Bases.T
-        case (Bases.C | Bases.c) => Bases.C
-        case (Bases.N | Bases.n) => Bases.N
-        case (other: Byte)       => other.toChar.toUpper.toByte
-      }
-    )
+    // We modify the array in place.
+    var i = 0
+    while (i < bases.length) {
+      bases(i) = (bases(i) | 32).toByte  // force upper-case by setting 6'th bit
+      i += 1
+    }
+    bases
   }
-
 }
