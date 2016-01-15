@@ -23,7 +23,9 @@ case class SmallSomaticCharacterization(
   germlineGenotypeQuality: Int,
   normalPercentError: Double,
   sampleMixtures: PerSample[Map[String, Double]],
-  allelicDepthsPerSample: PerSample[Map[String, (Int, Int)]]) // allele -> (total, positive strand)
+  allelicDepthsPerSample: PerSample[Map[String, (Int, Int)]],
+  readSupportRef: PerSample[Set[String]],
+  readSupportAlt: PerSample[Set[String]]) // allele -> (total, positive strand)
     extends SmallCharacterization {
 
   def isVariant = pooledCall || individualCall
@@ -100,7 +102,10 @@ object SmallSomaticCharacterization {
         germlineCharacterization.genotypeQuality,
         normalErrorRate * 100.0,
         perSampleGenotypes,
-        sampleStats.map(_.allelicDepths))
+        sampleStats.map(_.allelicDepths),
+        sampleStats.map(_.readsSupportingAllele(ref)),
+        sampleStats.map(_.readsSupportingAllele(topAlt))
+      )
     }
 
     if (germlineCharacterization.isVariant) {

@@ -28,8 +28,8 @@ class MappedReadSerializerSuite extends GuacFunSuite with Matchers {
   test("serialize / deserialize mapped read") {
     val read = MappedRead(
       5, // token
-      "TCGACCCTCGA",
       "read1",
+      "TCGACCCTCGA",
       Array[Byte]((10 to 20).map(_.toByte): _*),
       true,
       "some sample name",

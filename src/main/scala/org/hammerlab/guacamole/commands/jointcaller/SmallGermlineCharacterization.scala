@@ -77,11 +77,6 @@ object SmallGermlineCharacterization {
           - parameters.negativeLog10CompoundAlternatePrior)
     )
     val genotype = logUnnormalizedPosteriors.toSeq.maxBy(_._2)._1
-    //if (genotype != (ref, ref)) {
-    //  println("Adjusted %d -> %d".format(elements.size, downsampledElements.size))
-    //}
-    val alleleToReads = elements.groupBy(element => (Bases.basesToString(element.sequencedBases)))
-      .mapValues(_.map(_.read.name).toSet).withDefaultValue(Set.empty)
     SmallGermlineCharacterization(
       normalDNAPileups(0).referenceName,
       normalDNAPileups(0).locus,
@@ -92,8 +87,8 @@ object SmallGermlineCharacterization {
       stats.allelicDepths,
       depth,
       logUnnormalizedPosteriors,
-      alleleToReads(ref),
-      alleleToReads(stats.topAlt))
+      stats.readsSupportingAllele(ref),
+      stats.readsSupportingAllele(stats.topAlt))
   }
 
   def logPosteriorsToNormalizedPhred(log10Probabilities: Seq[Double], log10Precision: Double = -16): Seq[Double] = {

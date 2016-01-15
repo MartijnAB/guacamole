@@ -13,9 +13,11 @@ trait SmallCharacterization {
 
 object SmallCharacterization {
   case class PileupStats(ref: String, elements: Seq[PileupElement]) {
-    val alleleStats = elements.sortBy(_.qualityScore * -1).groupBy(element => {
+    val alleleToElements = elements.sortBy(_.qualityScore * -1).groupBy(element => {
       Bases.basesToString(element.sequencedBases).toUpperCase
-    }).mapValues(items => {
+    })
+    val alleleStats = alleleToElements
+      .mapValues(items => {
       val positive = items.filter(_.read.isPositiveStrand)
       val negative = items.filter(!_.read.isPositiveStrand)
       val numToTake = Math.max(Math.min(positive.size, negative.size), 3)
@@ -29,6 +31,10 @@ object SmallCharacterization {
 
     val topAlt = nonRefAlleles.headOption.getOrElse("N")
     val secondAlt = if (nonRefAlleles.size > 1) nonRefAlleles(1) else "N"
+
+    lazy val readsSupportingAllele = alleleToElements
+      .mapValues(_.filter(_.read.alignmentQuality > 0).map(_.read.name).toSet)
+      .withDefaultValue(Set.empty)
 
     def logLikelihoodPileup(mixture: Map[String, Double]): Double = {
       def logLikelihoodPileupElement(element: PileupElement): Double = {
@@ -48,8 +54,4 @@ object SmallCharacterization {
       downsampledElements.map(logLikelihoodPileupElement _).sum
     }
   }
-  object PileupStats {
-
-  }
-
 }
