@@ -22,8 +22,7 @@ case class SmallGermlineCharacterization(contig: String,
                                          allelicDepths: Map[String, (Int, Int)], // allele -> (total, positive strand) depth: Int,
                                          depth: Int,
                                          logUnnormalizedPosteriors: Map[(String, String), Double],
-                                         readSupportRef: Set[String],
-                                         readSupportAlt: Set[String])
+                                         readNamesByAllele: Map[String, Set[String]])
     extends SmallCharacterization {
 
   def topAltAllelicFraction =
@@ -87,8 +86,7 @@ object SmallGermlineCharacterization {
       stats.allelicDepths,
       depth,
       logUnnormalizedPosteriors,
-      stats.readsSupportingAllele(ref),
-      stats.readsSupportingAllele(stats.topAlt))
+      stats.readNamesByAllele)
   }
 
   def logPosteriorsToNormalizedPhred(log10Probabilities: Seq[Double], log10Precision: Double = -16): Seq[Double] = {
@@ -126,8 +124,7 @@ object SmallGermlineCharacterization {
         start.depth,
         start.logUnnormalizedPosteriors.map(
           pair => (convertAllele(pair._1._1), convertAllele(pair._1._2)) -> pair._2),
-        Set.empty,
-        Set.empty)
+        Map.empty)
 
     }
 

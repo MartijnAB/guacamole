@@ -32,7 +32,7 @@ object SmallCharacterization {
     val topAlt = nonRefAlleles.headOption.getOrElse("N")
     val secondAlt = if (nonRefAlleles.size > 1) nonRefAlleles(1) else "N"
 
-    lazy val readsSupportingAllele = alleleToElements
+    lazy val readNamesByAllele = alleleToElements
       .mapValues(_.filter(_.read.alignmentQuality > 0).map(_.read.name).toSet)
       .withDefaultValue(Set.empty)
 

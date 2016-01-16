@@ -11,7 +11,8 @@ import org.hammerlab.guacamole.pileup.Pileup
 import org.hammerlab.guacamole.reference.ReferenceBroadcast
 import org.hammerlab.guacamole.{ Bases, ReadSet }
 
-import scala.collection.JavaConversions
+import scala.collection.{ mutable, JavaConversions }
+import scala.collection.mutable.ArrayBuffer
 
 case class SmallSomaticCharacterization(
   contig: String,
@@ -23,13 +24,19 @@ case class SmallSomaticCharacterization(
   germlineGenotypeQuality: Int,
   normalPercentError: Double,
   sampleMixtures: PerSample[Map[String, Double]],
-  allelicDepthsPerSample: PerSample[Map[String, (Int, Int)]],
-  readSupportRef: PerSample[Set[String]],
-  readSupportAlt: PerSample[Set[String]]) // allele -> (total, positive strand)
+  allelicDepthsPerSample: PerSample[Map[String, (Int, Int)]], // allele -> (total, positive strand)
+  readNamesByAllele: PerSample[Map[String, Set[String]]])
     extends SmallCharacterization {
 
   def isVariant = pooledCall || individualCall
 
+  def readNamesRef(): PerSample[Set[String]] = {
+    readNamesByAllele.map(_.getOrElse(ref, Set.empty))
+  }
+
+  def readNamesAlt(): PerSample[Set[String]] = {
+    readNamesByAllele.map(_.getOrElse(topAlt, Set.empty))
+  }
 }
 object SmallSomaticCharacterization {
 
@@ -103,8 +110,7 @@ object SmallSomaticCharacterization {
         normalErrorRate * 100.0,
         perSampleGenotypes,
         sampleStats.map(_.allelicDepths),
-        sampleStats.map(_.readsSupportingAllele(ref)),
-        sampleStats.map(_.readsSupportingAllele(topAlt))
+        sampleStats.map(_.readNamesByAllele)
       )
     }
 
@@ -128,34 +134,64 @@ object SmallSomaticCharacterization {
     }
   }
 
-  def makeHtsjdVariantContext(item: SmallSomaticCharacterization, sampleNames: Seq[String], reference: ReferenceBroadcast): VariantContext = {
-    val (adjustedPosition, adjustAllele) = if (item.topAlt.nonEmpty) {
-      (item.position, (allele: String) => allele)
+  /**
+   *
+   * @param haplotype consecutive characterizations that form the same VCF-style variant
+   * @param sampleNames
+   * @param reference
+   * @return
+   */
+  def makeHtsjdVariantContext(haplotype: Seq[SmallSomaticCharacterization],
+                              sampleNames: PerSample[String],
+                              reference: ReferenceBroadcast): VariantContext = {
+    assume(haplotype.nonEmpty)
+    val contig = haplotype.head.contig
+    assume(haplotype.forall(item => item.contig == haplotype(0).contig))
+    assume(haplotype.map(_.position) == haplotype.head.position.to(haplotype.last.position))
+
+    val rawAltSequence = haplotype.map(_.topAlt).mkString
+    val refPrepend = if (rawAltSequence.isEmpty) {
+      // VCF requires non-empty alt alleles (e.g. a deletion C -> "" is coded as AC -> "A" where A is the preceding base)
+      Bases.baseToString(reference.getContig(contig)(haplotype(0).position.toInt - 1))
     } else {
-      val refSeqeunce = Bases.basesToString(
-        reference.getReferenceSequence(item.contig, item.position.toInt - 1, item.position.toInt + 1)).toUpperCase
-      (item.position - 1, (allele: String) => refSeqeunce(0) + allele)
+      ""
     }
+    val altSequence = refPrepend + rawAltSequence
+    val start_inclusive = haplotype.head.position - refPrepend.length
+    val end_inclusive = haplotype.last.position
+    assert(end_inclusive - start_inclusive + 1 == refPrepend.length + haplotype.length)
 
-    val alleles = Seq(adjustAllele(item.ref), adjustAllele(item.topAlt)).distinct
+    val refSequence = Bases.basesToString(reference.getContig(contig)
+      .slice(start_inclusive.toInt, end_inclusive.toInt + 1))
+    assert(refPrepend + haplotype.map(_.ref).mkString == refSequence)
 
-    def makeHtsjdkAllele(allele: String): Allele = Allele.create(allele, allele == adjustAllele(item.ref))
+    val alleles = Seq(refSequence, altSequence).distinct
+
+    def makeHtsjdkAllele(allele: String): Allele = Allele.create(allele, allele == refSequence)
+
+    def range[K: Numeric](f: SmallSomaticCharacterization => K): String = {
+      val values = haplotype.map(f(_))
+      val max = values.max
+      val min = values.min
+      if (max == min) max.toString else "%s-%s".format(min.toString, max.toString)
+    }
 
     val genotypes = sampleNames.zipWithIndex.map({
       case (name, sampleIndex) => {
-        val allelicDepths = item.allelicDepthsPerSample(sampleIndex).map(kv => (adjustAllele(kv._1) -> kv._2))
-        val sampleMixture = item.sampleMixtures(sampleIndex)
-        val sampleAlleles = sampleMixture.keys.toSeq.map(adjustAllele)
-        val duplicatedSampleAlleles = if (sampleAlleles.length == 1)
-          Seq(sampleAlleles(0), sampleAlleles(0))
-        else
-          sampleAlleles
+        //val allelicDepths = items.map(_.allelicDepthsPerSample(sampleIndex).map(kv => refB(kv._1) -> kv._2))
+        //val sampleMixture = range(_.sampleMixtures(sampleIndex))
+        ///val sampleAlleles = sampleMixture.keys.toSeq.map(adjustAllele)
+
+        // Are there any reads that imply this haplotype for this sample?
+        val called = haplotype.map(_.readNamesAlt()(sampleIndex)).reduce(_.intersect(_)).nonEmpty
+
+        val duplicatedSampleAlleles = if (called) Seq(refSequence, altSequence) else Seq(refSequence, refSequence)
 
         new GenotypeBuilder(name)
           .alleles(JavaConversions.seqAsJavaList(duplicatedSampleAlleles.map(makeHtsjdkAllele _)))
-          .AD(alleles.map(allelicDepths.getOrElse(_, (0, 0))).map(_._1).toArray)
-          .attribute("GGQ", item.germlineGenotypeQuality)
-          .attribute("NPE", item.normalPercentError)
+          //.AD(alleles.map(allelicDepths.getOrElse(_, (0, 0))).map(_._1).toArray)
+          .attribute("GGQ", range(_.germlineGenotypeQuality))
+          .attribute("NPE", range(_.normalPercentError))
           // .PL(genotypeLikelihoods.toArray)
           // .DP(depth)
           // .GQ(genotypeQuality.toInt)
@@ -163,23 +199,29 @@ object SmallSomaticCharacterization {
           //   pair => "%s/%s=%1.2f".format(pair._1._1, pair._1._2, pair._2)).mkString(" "))
           // .attribute("SBP",
           //   alleles.map(allele => "%s=%1.2f".format(allele, strandBias.getOrElse(allele, 0.0))).mkString(" "))
+          /*
           .attribute("ADP",
             alleles.map(allele => {
               val totalAndPositive = allelicDepths.getOrElse(allele, (0, 0))
               "%s=%d/%d".format(allele, totalAndPositive._2, totalAndPositive._1)
             }).mkString(" "))
+            */
           .make
       }
     })
 
-    val trigger = (
-      (if (item.pooledCall) Seq("POOLED") else Seq.empty) ++
-      (if (item.individualCall) Seq("INDIVIDUAL") else Seq.empty)).mkString("+")
+    val numPooled = haplotype.count(_.pooledCall)
+    val numIndividual = haplotype.count(_.individualCall)
+    def triggerBracket(num: Int): String = {
+      if (num < haplotype.length) "[%d/%d]".format(num, haplotype.length) else ""
+    }
+    val trigger = ((if (numPooled > 0) Seq("POOLED" + triggerBracket(numPooled)) else Seq.empty) ++
+      (if (numIndividual > 0) Seq("INDIVIDUAL" + triggerBracket(numIndividual)) else Seq.empty)).mkString("+")
 
     new VariantContextBuilder()
-      .chr(item.contig)
-      .start(adjustedPosition + 1) // one based based inclusive
-      .stop(adjustedPosition + 1 + math.max(adjustAllele(item.ref).length - 1, 0))
+      .chr(contig)
+      .start(start_inclusive + 1) // one based based inclusive
+      .stop(end_inclusive + 1)
       .genotypes(JavaConversions.seqAsJavaList(genotypes))
       .alleles(JavaConversions.seqAsJavaList(alleles.map(makeHtsjdkAllele _)))
       .attribute("TRIGGER", if (trigger.nonEmpty) trigger else "NONE")
@@ -224,18 +266,61 @@ object SmallSomaticCharacterization {
     header.addMetaDataLine(new VCFHeaderLine("Caller", "Guacamole"))
     writer.writeHeader(header)
 
-    var prevChr = ""
-    var prevStart = -1
-    calls.foreach(call => {
-      val variantContext = makeHtsjdVariantContext(call, sampleNames, reference)
-      if (prevChr == variantContext.getContig) {
-        assert(variantContext.getStart >= prevStart,
-          "Out of order: expected %d >= %d".format(variantContext.getStart, prevStart))
+    val groupedCalls = mutable.ArrayBuffer.empty[SmallSomaticCharacterization]
+
+    def intersectSize(group1: PerSample[Set[String]], group2: PerSample[Set[String]]): Int = {
+      group1.zip(group2).map(pair => pair._1.count(pair._2.contains _)).sum
+    }
+
+    def haplotypesWithEvidence(prefix: Seq[SmallSomaticCharacterization],
+                               remaining: Seq[SmallSomaticCharacterization]): Seq[Seq[SmallSomaticCharacterization]] = {
+      if (remaining.isEmpty) {
+        Seq(prefix)
+      } else {
+        val minPosition = remaining.map(_.position).min
+        val (potentialAdditions, rest) = remaining.partition(_.position == minPosition)
+        potentialAdditions.flatMap(addition => {
+          val (numSameHaplotype, numEndCurrentHaplotype, numStartNewHaplotype) = if (prefix.nonEmpty) {
+            assert(minPosition == prefix.last.position + 1)
+            (intersectSize(prefix.last.readNamesAlt, addition.readNamesAlt),
+              intersectSize(prefix.last.readNamesAlt, addition.readNamesRef),
+              intersectSize(prefix.last.readNamesRef, addition.readNamesAlt))
+          } else {
+            (0, 0, 1) // Start a new haplotype.
+          }
+          (if (numSameHaplotype > 0) haplotypesWithEvidence(prefix ++ Seq(addition), rest) else Seq.empty) ++
+            (if (numEndCurrentHaplotype > 0) Seq(prefix) else Seq.empty) ++
+            (if (numStartNewHaplotype > 0) haplotypesWithEvidence(Seq(addition), rest) else Seq.empty)
+        })
       }
-      prevChr = variantContext.getContig
-      prevStart = variantContext.getStart
-      writer.add(variantContext)
+    }
+
+    val variantContexts = ArrayBuffer.newBuilder[VariantContext]
+
+    def processGroup(calls: Seq[SmallSomaticCharacterization]): Unit = {
+      val haplotypes = haplotypesWithEvidence(Seq.empty, calls)
+      variantContexts ++= haplotypes.map(makeHtsjdVariantContext(_, sampleNames, reference))
+    }
+
+    calls.foreach(call => {
+      val groupWithPrevious = call.isVariant &&
+        groupedCalls.lastOption.forall(
+          prev => prev.contig == call.contig && call.position - prev.position <= 1)
+
+      if (groupWithPrevious) {
+        groupedCalls.append(call)
+      } else {
+        processGroup(groupedCalls)
+        groupedCalls.clear()
+        groupedCalls.append(call)
+      }
     })
+    if (groupedCalls.nonEmpty) {
+      processGroup(groupedCalls)
+      groupedCalls.clear()
+    }
+
+    variantContexts.result.sortBy(context => (context.getContig, context.getStart)).foreach(writer.add(_))
     writer.close()
 
   }
